@@ -5,24 +5,16 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         Off = 0,
         Starting = 1,
         Running = 2,
-        Paused = 3,
-        Suspended = 4,
-        Stopping = 5,
-        Faulted = 6
-    }
-
-    public enum RotationMode
-    {
-        History = 0,
-        Cycle = 1
+        Suspended = 3,
+        Stopping = 4,
+        Faulted = 5
     }
 
     public enum SelectionSource
     {
         UserSelection = 0,
-        HistoryNavigation = 1,
-        SessionSeed = 2,
-        RecoveryObservation = 3
+        SessionSeed = 1,
+        RecoveryObservation = 2
     }
 
     public enum ObjectCategory
@@ -61,15 +53,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         Restored = 2,
         RestoreFailed = 3,
         WindowDisposed = 4
-    }
-
-    public enum FavoriteResolutionState
-    {
-        Resolved = 0,
-        TemporaryUnsaved = 1,
-        SceneUnloaded = 2,
-        DeletedOrMissing = 3,
-        ResolutionFailed = 4
     }
 
     public enum SelectionFilterOutcome

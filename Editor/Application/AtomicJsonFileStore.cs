@@ -8,8 +8,8 @@ using System.Text;
 namespace DennokoWorks.InspectorManagerV2.Application
 {
     /// <summary>
-    /// Atomic, schema-versioned, SHA-256 checksummed persistence store (Section 10 & 14.4).
-    /// Supports coalesced settings/favorites writes with immediate read-your-own-writes,
+    /// Atomic, schema-versioned, SHA-256 checksummed persistence store.
+    /// Supports coalesced settings writes with immediate read-your-own-writes,
     /// backup fallback, corruption quarantine, newer-schema write blocking,
     /// and a separate immediate synchronous path for LockLease recovery journals.
     /// </summary>
@@ -23,7 +23,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
         private readonly string _projectId;
         private readonly object _ioLock = new object();
 
-        private SettingsAndFavoritesDto _pendingSettings;
+        private SettingsDto _pendingSettings;
         private long _pendingRevision;
         private long _lastCommittedRevision;
         private bool _hasPendingSettings;
@@ -47,27 +47,26 @@ namespace DennokoWorks.InspectorManagerV2.Application
             _recoveryBackupPath = Path.Combine(directoryPath, "recovery_journal_v1.json.bak");
         }
 
-        public LoadResult<SettingsAndFavoritesDto> LoadSettingsAndFavorites()
+        public LoadResult<SettingsDto> LoadSettings()
         {
             lock (_ioLock)
             {
-                // Section 14.4: Unflushed values immediately reflected in Load.
                 if (_hasPendingSettings && _pendingSettings != null)
                 {
-                    return new LoadResult<SettingsAndFavoritesDto>(true, _pendingSettings);
+                    return new LoadResult<SettingsDto>(true, _pendingSettings);
                 }
 
                 return LoadEnvelope(
                     _settingsPath,
                     _settingsBackupPath,
                     PersistenceSchema.CurrentSettingsSchemaVersion,
-                    SettingsAndFavoritesDto.FromJsonDictionary,
-                    () => new SettingsAndFavoritesDto { ProjectId = _projectId },
+                    SettingsDto.FromJsonDictionary,
+                    () => new SettingsDto { ProjectId = _projectId },
                     trackNewerSchemaBlock: true);
             }
         }
 
-        public SaveResult QueueSaveSettingsAndFavorites(SettingsAndFavoritesDto dto, long revision)
+        public SaveResult QueueSaveSettings(SettingsDto dto, long revision)
         {
             if (dto == null) return SaveResult.Fail("DTO is null.");
 
@@ -80,7 +79,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
 
                 if (revision < _pendingRevision || revision < _lastCommittedRevision)
                 {
-                    // Section 10: Prevent stale older save from overwriting newer state.
                     return SaveResult.Ok();
                 }
 
@@ -91,7 +89,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
             }
         }
 
-        public SaveResult FlushSettingsAndFavorites()
+        public SaveResult FlushSettings()
         {
             lock (_ioLock)
             {
@@ -147,7 +145,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
 
             lock (_ioLock)
             {
-                // Section 10 & 14.4: Always written immediately and synchronously BEFORE acquiring any LockLease.
                 return WriteEnvelopeAtomic(
                     _recoveryPath,
                     _recoveryBackupPath,
@@ -172,7 +169,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
             _disposed = true;
             try
             {
-                FlushSettingsAndFavorites();
+                FlushSettings();
             }
             catch
             {
@@ -254,7 +251,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 }
             }
 
-            // Section 10: Both primary and backup failed -> quarantine corrupt files and fall back to defaults.
             string stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture);
             if (primaryExists) TryQuarantineFile(primaryPath, stamp);
             if (backupExists) TryQuarantineFile(backupPath, stamp);
@@ -290,11 +286,8 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 };
 
                 string serialized = SimpleJson.Serialize(envelope);
-
-                // Step 1: Write temporary file on the same filesystem.
                 File.WriteAllText(tmpPath, serialized, new UTF8Encoding(false));
 
-                // Step 2: Read-back & checksum verification before touching primary or backup.
                 string verifyContent = File.ReadAllText(tmpPath, Encoding.UTF8);
                 var verifyObj = SimpleJson.DeserializeObject(verifyContent);
                 var verifyPayload = SimpleJson.GetObject(verifyObj, "payload");
@@ -304,7 +297,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
                     throw new IOException("Read-back verification failed for temporary persistence file.");
                 }
 
-                // Step 3: Preserve previous valid primary as backup and atomically replace.
                 if (File.Exists(primaryPath))
                 {
                     try

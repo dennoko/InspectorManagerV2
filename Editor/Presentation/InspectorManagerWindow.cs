@@ -1,30 +1,35 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using DennokoWorks.InspectorManagerV2.Application;
 using DennokoWorks.InspectorManagerV2.Domain;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.UIElements;
 
 namespace DennokoWorks.InspectorManagerV2.Presentation
 {
     public interface IManagerWindowHost
     {
         InspectorManagerCoordinator Coordinator { get; }
-        ISelectionAdapter SelectionAdapter { get; }
-        Func<UnityEngine.Object, ObjectRefKey> GetObjectRefKey { get; }
         void RegisterWindow(EditorWindow window);
         void UnregisterWindowOnDestroy(EditorWindow window);
     }
 
     /// <summary>
-    /// Presentation layer EditorWindow (Section 3, 6.2, 11, 14.3).
-    /// - Strictly locks one immutable UiSnapshot at EventType.Layout and reuses it across Repaint so IMGUI layout never drifts.
-    /// - NEVER performs Unity Inspector writes, Selection writes, or file I/O inside OnGUI; only enqueues commands.
+    /// UI Toolkit (UXML/USS) EditorWindow implementing the dennokoworks floating design system.
+    /// Displays History-mode managed Inspector order/state management and collapsible Advanced Settings.
+    /// Never mutates Unity Inspectors or saves files synchronously from UI callbacks; only enqueues commands.
     /// </summary>
     public sealed class InspectorManagerWindow : EditorWindow
     {
+        private const string THEME_USS_GUID  = "a1d8c4f0e72b4a918c3e5f6d10b2a401";
+        private const string BLOCKS_USS_GUID = "a1d8c4f0e72b4a918c3e5f6d10b2a402";
+        private const string WINDOW_USS_GUID = "a1d8c4f0e72b4a918c3e5f6d10b2a403";
+        private const string UXML_GUID       = "a1d8c4f0e72b4a918c3e5f6d10b2a404";
+
+        private const string ToolName = "Inspector Manager V2";
+
         public static Func<IManagerWindowHost> HostProvider;
 
         private static readonly ObjectCategory[] s_configurableCategories =
@@ -47,15 +52,52 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
         };
 
         private IManagerWindowHost _host;
-        private UiSnapshot _frameSnapshot;
-        private int _selectedTab;
-        private Vector2 _scrollPos;
-        private Vector2 _diagScrollPos;
         private bool _subscribed;
+        private bool _uiBuilt;
+        private bool _suppressControlCallbacks;
 
-        // Drag state for history item drag-to-Unity
-        private int _draggingHistoryIndex = -1;
-        private Vector2 _dragStartMousePos;
+        // Shared components
+        private DennokoAppBar _appBar;
+        private DennokoStatus _status;
+
+        // Bound UXML elements
+        private VisualElement _faultBanner;
+        private Label _faultBannerText;
+        private Button _retryRestoreButton;
+        private HelpBox _warningHelpBox;
+        private VisualElement _runningBanner;
+        private Label _runningBannerState;
+        private Label _runningBannerDetail;
+
+        private Label _managedCardTitle;
+        private Button _refreshButton;
+        private Button _resetLayoutButton;
+        private VisualElement _managedList;
+        private VisualElement _managedEmpty;
+        private Label _managedEmptyMessage;
+        private Button _managedEmptyAdd;
+        private Label _historyMruHint;
+
+        private VisualElement _externalCard;
+        private Label _externalCardTitle;
+        private VisualElement _externalList;
+        private Label _externalHint;
+
+        private VisualElement _advancedDetails;
+        private Label _advancedDetailsTitle;
+        private VisualElement _advancedDetailsChips;
+        private SliderInt _maxHistorySlider;
+        private Toggle _recordSceneToggle;
+        private Toggle _recordAssetsToggle;
+        private Toggle _showOverlaysToggle;
+        private Label _blockedCategoriesTitle;
+        private Label _blockedCategoriesHint;
+        private VisualElement _blockedCategoriesGrid;
+        private readonly Dictionary<ObjectCategory, Toggle> _categoryToggles = new Dictionary<ObjectCategory, Toggle>();
+
+        private Label _footerInfo;
+        private Button _addInspectorButton;
+        private Button _primaryToggleButton;
 
         public void AttachHost(IManagerWindowHost host)
         {
@@ -72,19 +114,19 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
                 _host.Coordinator.StateChanged += OnRuntimeStateChanged;
                 _subscribed = true;
             }
-            Repaint();
+
+            RefreshView();
         }
 
         private void OnEnable()
         {
-            titleContent = new GUIContent("Inspector Manager V2");
-            minSize = new Vector2(360f, 320f);
+            titleContent = new GUIContent(ToolName);
+            minSize = new Vector2(360f, 360f);
             EnsureHostAttached();
         }
 
         private void OnDisable()
         {
-            // Section 9: Do NOT interpret OnDisable alone as user closing the window!
             if (_host != null && _subscribed)
             {
                 _host.Coordinator.StateChanged -= OnRuntimeStateChanged;
@@ -105,9 +147,37 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
             }
         }
 
-        private void OnRuntimeStateChanged()
+        public void CreateGUI()
         {
-            Repaint();
+            VisualElement root = rootVisualElement;
+            root.Clear();
+
+            // テーマ非依存ルート設定 (dennokoworks-design 絶対規則)
+            root.AddToClassList("dennoko-root");
+            root.style.backgroundColor = (Color)new Color32(0x12, 0x12, 0x12, 0xFF);
+            root.style.flexGrow = 1;
+
+            // 標準フォント適用 (メイリオ SDF + 自己修復)
+            DennokoUIFont.Apply(root);
+
+            // USS ロード順: Theme -> Blocks -> Window
+            AddStyleSheet(root, THEME_USS_GUID);
+            AddStyleSheet(root, BLOCKS_USS_GUID);
+            AddStyleSheet(root, WINDOW_USS_GUID);
+
+            var uxml = LoadAssetByGuid<VisualTreeAsset>(UXML_GUID);
+            if (uxml == null)
+            {
+                root.Add(new Label("UXML Asset が見つかりません。GUID を確認してください: " + UXML_GUID));
+                return;
+            }
+
+            uxml.CloneTree(root);
+            BindElements(root);
+            _uiBuilt = true;
+
+            EnsureHostAttached();
+            RefreshView();
         }
 
         private void EnsureHostAttached()
@@ -127,753 +197,569 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
             }
         }
 
-        private void OnGUI()
+        private void OnRuntimeStateChanged()
         {
-            EnsureHostAttached();
-            if (_host == null)
+            if (_uiBuilt)
             {
-                EditorGUILayout.HelpBox("Inspector Manager V2 runtime is initializing...", MessageType.Info);
-                return;
+                RefreshView();
             }
+        }
 
-            // Section 14.3: Capture one immutable UiSnapshot at Layout and use it consistently through Repaint.
-            if (Event.current.type == EventType.Layout || _frameSnapshot == null)
+        private void BindElements(VisualElement root)
+        {
+            _status = new DennokoStatus(root.Q<Label>("status-label"), readyText: "停止中 (Off)");
+
+            _appBar = new DennokoAppBar(root, ToolName)
             {
-                _frameSnapshot = _host.Coordinator.GetUiSnapshot();
-            }
-
-            var snapshot = _frameSnapshot;
-            var state = snapshot.State;
-            string lang = state.Settings.Language;
-
-            DrawHeaderAndControls(snapshot, state, lang);
-            DrawBanners(snapshot, state, lang);
-
-            EditorGUILayout.Space(4);
-            string[] tabs =
-            {
-                Localization.Get(lang, "TabInspectors"),
-                Localization.Get(lang, "TabHistory") + " (" + state.NavigationHistory.Entries.Count + ")",
-                Localization.Get(lang, "TabFavorites") + " (" + state.Favorites.Count + ")",
-                Localization.Get(lang, "TabSettings")
+                ResetAll = () => _host?.Coordinator.EnqueueResetSettings(),
+                AddToolMenuItems = menu =>
+                {
+                    string lang = _host != null ? _host.Coordinator.CurrentState.Settings.Language : "ja";
+                    menu.AddItem(new GUIContent(Localization.Get(lang, "MenuRefresh")), false, () => _host?.Coordinator.EnqueueSynchronizeWindows());
+                    menu.AddItem(new GUIContent(Localization.Get(lang, "MenuResetLayout")), false, () => _host?.Coordinator.EnqueueResetLayout());
+                }
             };
-            _selectedTab = GUILayout.Toolbar(_selectedTab, tabs);
-            EditorGUILayout.Space(4);
-
-            _scrollPos = EditorGUILayout.BeginScrollView(_scrollPos);
-            switch (_selectedTab)
+            _appBar.LanguageChanged += english =>
             {
-                case 0:
-                    DrawInspectorsTab(state, lang);
-                    break;
-                case 1:
-                    DrawHistoryTab(state, lang);
-                    break;
-                case 2:
-                    DrawFavoritesTab(state, lang);
-                    break;
-                case 3:
-                    DrawSettingsAndDiagnosticsTab(snapshot, state, lang);
-                    break;
-            }
-            EditorGUILayout.EndScrollView();
-        }
-
-        private void DrawHeaderAndControls(UiSnapshot snapshot, ManagerState state, string lang)
-        {
-            var coordinator = _host.Coordinator;
-
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-
-            // Row 1: Lifecycle badge + Start/Stop + Pause/Resume + Back/Forward
-            EditorGUILayout.BeginHorizontal();
-            Color prevBg = GUI.backgroundColor;
-            GUI.backgroundColor = GetLifecycleColor(state.LifecycleState);
-            GUILayout.Label(Localization.LifecycleLabel(lang, state.LifecycleState), EditorStyles.miniButton, GUILayout.Width(130));
-            GUI.backgroundColor = prevBg;
-
-            bool canStart = (state.LifecycleState == RuntimeLifecycleState.Off || state.LifecycleState == RuntimeLifecycleState.Suspended)
-                && state.Capabilities.SupportsRotation;
-            bool isRunning = state.LifecycleState == RuntimeLifecycleState.Running;
-            bool isPaused = state.LifecycleState == RuntimeLifecycleState.Paused;
-            bool isActiveSession = isRunning || isPaused;
-
-            using (new EditorGUI.DisabledScope(!canStart))
-            {
-                if (!isActiveSession && GUILayout.Button(Localization.Get(lang, "Start"), GUILayout.Height(20)))
+                if (_suppressControlCallbacks || _host == null) return;
+                var cur = _host.Coordinator.CurrentState.Settings;
+                string nextLang = english ? "en" : "ja";
+                if (!string.Equals(cur.Language, nextLang, StringComparison.OrdinalIgnoreCase))
                 {
-                    coordinator.EnqueueStartRotation();
+                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(language: nextLang));
                 }
+            };
+
+            _faultBanner = root.Q<VisualElement>("fault-banner");
+            _faultBannerText = root.Q<Label>("fault-banner-text");
+            _retryRestoreButton = root.Q<Button>("retry-restore-button");
+            if (_retryRestoreButton != null)
+            {
+                _retryRestoreButton.clicked += () => _host?.Coordinator.EnqueueRetryRestore();
             }
 
-            if (isActiveSession)
+            _warningHelpBox = root.Q<HelpBox>("warning-helpbox");
+
+            _runningBanner = root.Q<VisualElement>("running-banner");
+            _runningBannerState = root.Q<Label>("running-banner-state");
+            _runningBannerDetail = root.Q<Label>("running-banner-detail");
+
+            _managedCardTitle = root.Q<Label>("managed-card-title");
+            _refreshButton = root.Q<Button>("refresh-button");
+            _resetLayoutButton = root.Q<Button>("reset-layout-button");
+            DennokoIcons.Apply(_refreshButton, DennokoIcons.Refresh, "↻", "Inspector 一覧を再検出");
+            DennokoIcons.Apply(_resetLayoutButton, "d_RotateTool|RotateTool", "↺", "配置・除外をリセット");
+            if (_refreshButton != null) _refreshButton.clicked += () => _host?.Coordinator.EnqueueSynchronizeWindows();
+            if (_resetLayoutButton != null) _resetLayoutButton.clicked += () => _host?.Coordinator.EnqueueResetLayout();
+
+            _managedList = root.Q<VisualElement>("managed-list");
+            _managedEmpty = root.Q<VisualElement>("managed-empty");
+            _managedEmptyMessage = root.Q<Label>("managed-empty-message");
+            _managedEmptyAdd = root.Q<Button>("managed-empty-add");
+            if (_managedEmptyAdd != null) _managedEmptyAdd.clicked += () => _host?.Coordinator.EnqueueAddInspector();
+            _historyMruHint = root.Q<Label>("history-mru-hint");
+
+            _externalCard = root.Q<VisualElement>("external-card");
+            _externalCardTitle = root.Q<Label>("external-card-title");
+            _externalList = root.Q<VisualElement>("external-list");
+            _externalHint = root.Q<Label>("external-hint");
+
+            // 詳細設定 (.dennoko-details: 既定折りたたみ＋要約チップ)
+            _advancedDetails = root.Q<VisualElement>("advanced-details");
+            _advancedDetailsTitle = root.Q<Label>("advanced-details-title");
+            _advancedDetailsChips = root.Q<VisualElement>("advanced-details-chips");
+            DennokoBlockUI.BindDetails(_advancedDetails, open: false);
+
+            _maxHistorySlider = root.Q<SliderInt>("max-history-slider");
+            _recordSceneToggle = root.Q<Toggle>("record-scene-toggle");
+            _recordAssetsToggle = root.Q<Toggle>("record-assets-toggle");
+            _showOverlaysToggle = root.Q<Toggle>("show-overlays-toggle");
+            _blockedCategoriesTitle = root.Q<Label>("blocked-categories-title");
+            _blockedCategoriesHint = root.Q<Label>("blocked-categories-hint");
+            _blockedCategoriesGrid = root.Q<VisualElement>("blocked-categories-grid");
+
+            _maxHistorySlider?.RegisterValueChangedCallback(evt =>
             {
-                if (isRunning && GUILayout.Button(Localization.Get(lang, "Pause"), GUILayout.Height(20)))
+                if (_suppressControlCallbacks || _host == null) return;
+                var cur = _host.Coordinator.CurrentState.Settings;
+                if (evt.newValue != cur.MaxRotationHistory)
                 {
-                    coordinator.EnqueuePauseRotation();
+                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(maxRotationHistory: evt.newValue));
                 }
-                else if (isPaused && GUILayout.Button(Localization.Get(lang, "Resume"), GUILayout.Height(20)))
+            });
+
+            _recordSceneToggle?.RegisterValueChangedCallback(evt =>
+            {
+                if (_suppressControlCallbacks || _host == null) return;
+                var cur = _host.Coordinator.CurrentState.Settings;
+                if (evt.newValue != cur.RecordSceneObjects)
                 {
-                    coordinator.EnqueueResumeRotation();
+                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(recordSceneObjects: evt.newValue));
                 }
+            });
 
-                if (GUILayout.Button(Localization.Get(lang, "Stop"), GUILayout.Height(20)))
+            _recordAssetsToggle?.RegisterValueChangedCallback(evt =>
+            {
+                if (_suppressControlCallbacks || _host == null) return;
+                var cur = _host.Coordinator.CurrentState.Settings;
+                if (evt.newValue != cur.RecordAssets)
                 {
-                    coordinator.EnqueueStopRotation(StopReason.UserRequested);
+                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(recordAssets: evt.newValue));
                 }
-            }
+            });
 
-            GUILayout.FlexibleSpace();
-
-            using (new EditorGUI.DisabledScope(!state.NavigationHistory.CanGoBack))
+            _showOverlaysToggle?.RegisterValueChangedCallback(evt =>
             {
-                if (GUILayout.Button(Localization.Get(lang, "Back"), GUILayout.Width(68), GUILayout.Height(20)))
+                if (_suppressControlCallbacks || _host == null) return;
+                var cur = _host.Coordinator.CurrentState.Settings;
+                if (evt.newValue != cur.ShowInspectorOverlays)
                 {
-                    coordinator.EnqueueNavigateBack();
+                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(showInspectorOverlays: evt.newValue));
                 }
+            });
+
+            BuildCategoryToggles();
+
+            _footerInfo = root.Q<Label>("footer-info");
+            _addInspectorButton = root.Q<Button>("add-inspector-button");
+            _primaryToggleButton = root.Q<Button>("primary-toggle-button");
+
+            if (_addInspectorButton != null)
+            {
+                _addInspectorButton.clicked += () => _host?.Coordinator.EnqueueAddInspector();
             }
 
-            using (new EditorGUI.DisabledScope(!state.NavigationHistory.CanGoForward))
+            if (_primaryToggleButton != null)
             {
-                if (GUILayout.Button(Localization.Get(lang, "Forward"), GUILayout.Width(68), GUILayout.Height(20)))
+                _primaryToggleButton.clicked += () =>
                 {
-                    coordinator.EnqueueNavigateForward();
-                }
-            }
-
-            EditorGUILayout.EndHorizontal();
-
-            EditorGUILayout.Space(3);
-
-            // Row 2: Mode selector + Add Inspector + Bulk Lock/Unlock (showing target count per Section 6.1)
-            EditorGUILayout.BeginHorizontal();
-            int modeIdx = state.Settings.Mode == RotationMode.History ? 0 : 1;
-            int nextModeIdx = GUILayout.Toolbar(modeIdx, new[]
-            {
-                Localization.Get(lang, "ModeHistory"),
-                Localization.Get(lang, "ModeCycle")
-            }, GUILayout.Width(200));
-
-            if (nextModeIdx != modeIdx)
-            {
-                var nextMode = nextModeIdx == 0 ? RotationMode.History : RotationMode.Cycle;
-                coordinator.EnqueueUpdateSettings(state.Settings.WithNextRevision(mode: nextMode), isExplicitLayoutChange: true);
-            }
-
-            GUILayout.FlexibleSpace();
-
-            int managedCount = state.GetManagedAliveWindowsOrdered().Count;
-            using (new EditorGUI.DisabledScope(!state.Capabilities.CanCreateWindow))
-            {
-                if (GUILayout.Button(Localization.Get(lang, "AddInspector"), EditorStyles.miniButton))
-                {
-                    coordinator.EnqueueAddInspector();
-                }
-            }
-
-            using (new EditorGUI.DisabledScope(managedCount == 0 || !state.Capabilities.CanWriteLock))
-            {
-                if (GUILayout.Button(Localization.Format(lang, "LockAll", managedCount), EditorStyles.miniButton))
-                {
-                    coordinator.EnqueueBulkLock(true);
-                }
-                if (GUILayout.Button(Localization.Format(lang, "UnlockAll", managedCount), EditorStyles.miniButton))
-                {
-                    coordinator.EnqueueBulkLock(false);
-                }
-            }
-
-            EditorGUILayout.EndHorizontal();
-
-            // Mode explanation hint (Section 5.3: explicitly state MRU distinct selection semantics)
-            string modeHint = state.Settings.Mode == RotationMode.History
-                ? Localization.Get(lang, "ModeHistoryHint")
-                : Localization.Get(lang, "ModeCycleHint");
-            EditorGUILayout.LabelField(modeHint, EditorStyles.miniLabel);
-
-            EditorGUILayout.EndVertical();
-        }
-
-        private void DrawBanners(UiSnapshot snapshot, ManagerState state, string lang)
-        {
-            if (state.LifecycleState == RuntimeLifecycleState.Faulted || state.HasIncompleteRestorations)
-            {
-                EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-                EditorGUILayout.LabelField(
-                    string.IsNullOrEmpty(state.LastError) ? Localization.Get(lang, "StatusFaulted") : state.LastError,
-                    EditorStyles.wordWrappedLabel);
-                if (GUILayout.Button(Localization.Get(lang, "RetryRestore"), GUILayout.Width(115), GUILayout.Height(24)))
-                {
-                    _host.Coordinator.EnqueueRetryRestore();
-                }
-                EditorGUILayout.EndHorizontal();
-            }
-
-            if (!state.Capabilities.SupportsRotation)
-            {
-                EditorGUILayout.HelpBox(Localization.Get(lang, "RotationUnavailable"), MessageType.Warning);
-            }
-
-            if (state.PersistenceWriteBlocked)
-            {
-                EditorGUILayout.HelpBox(Localization.Get(lang, "PersistenceBlocked"), MessageType.Warning);
-            }
-
-            if (snapshot.HasPendingVerification)
-            {
-                EditorGUILayout.HelpBox(Localization.Get(lang, "PendingVerifyBanner"), MessageType.Info);
-            }
-            else if (!string.IsNullOrEmpty(state.StatusNotice)
-                && state.StatusNotice != "Running"
-                && state.StatusNotice != "Off"
-                && state.StatusNotice != "Paused")
-            {
-                EditorGUILayout.HelpBox(state.StatusNotice, MessageType.Info);
+                    if (_host == null) return;
+                    var lifecycle = _host.Coordinator.CurrentState.LifecycleState;
+                    if (lifecycle == RuntimeLifecycleState.Running || lifecycle == RuntimeLifecycleState.Starting)
+                    {
+                        _host.Coordinator.EnqueueStopRotation(StopReason.UserRequested);
+                    }
+                    else
+                    {
+                        _host.Coordinator.EnqueueStartRotation();
+                    }
+                };
             }
         }
 
-        private void DrawInspectorsTab(ManagerState state, string lang)
+        private void BuildCategoryToggles()
         {
-            var coordinator = _host.Coordinator;
-            var managed = state.GetManagedAliveWindowsOrdered();
-            var participating = state.GetParticipatingWindowsOrdered();
-            var external = state.Windows.Where(w => !w.IsManaged && w.IsAlive).OrderBy(w => w.FixedDisplayNumber).ToArray();
+            if (_blockedCategoriesGrid == null) return;
+            _blockedCategoriesGrid.Clear();
+            _categoryToggles.Clear();
 
-            // Determine role slots for participating windows
+            for (int i = 0; i < s_configurableCategories.Length; i++)
+            {
+                var cat = s_configurableCategories[i];
+                var toggle = new Toggle(Localization.CategoryLabel("ja", cat));
+                toggle.AddToClassList("imv2-category-toggle");
+                toggle.RegisterValueChangedCallback(evt =>
+                {
+                    if (_suppressControlCallbacks || _host == null) return;
+                    var cur = _host.Coordinator.CurrentState.Settings;
+                    var nextSet = new HashSet<ObjectCategory>(cur.BlockedCategories);
+                    if (evt.newValue) nextSet.Add(cat);
+                    else nextSet.Remove(cat);
+                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(blockedCategories: nextSet));
+                });
+                _categoryToggles[cat] = toggle;
+                _blockedCategoriesGrid.Add(toggle);
+            }
+        }
+
+        private void RefreshView()
+        {
+            if (!_uiBuilt || _host == null) return;
+
+            var snapshot = _host.Coordinator.GetUiSnapshot();
+            var state = snapshot.State;
+            var settings = state.Settings;
+            string lang = settings.Language;
+            bool isEn = string.Equals(lang, "en", StringComparison.OrdinalIgnoreCase);
+
+            _suppressControlCallbacks = true;
+            try
+            {
+                _appBar?.SetEnglish(isEn);
+
+                // バナー類
+                bool showFault = state.LifecycleState == RuntimeLifecycleState.Faulted || state.HasIncompleteRestorations;
+                DennokoBlockUI.Show(_faultBanner, showFault);
+                if (showFault && _faultBannerText != null)
+                {
+                    _faultBannerText.text = string.IsNullOrEmpty(state.LastError)
+                        ? Localization.Get(lang, "StatusFaulted")
+                        : state.LastError;
+                }
+                if (_retryRestoreButton != null)
+                {
+                    _retryRestoreButton.text = Localization.Get(lang, "RetryRestore");
+                }
+
+                string warningText = null;
+                if (!state.Capabilities.SupportsRotation)
+                {
+                    warningText = Localization.Get(lang, "RotationUnavailable");
+                }
+                else if (state.PersistenceWriteBlocked)
+                {
+                    warningText = Localization.Get(lang, "PersistenceBlocked");
+                }
+                DennokoBlockUI.Show(_warningHelpBox, !string.IsNullOrEmpty(warningText));
+                if (_warningHelpBox != null && !string.IsNullOrEmpty(warningText))
+                {
+                    _warningHelpBox.text = warningText;
+                }
+
+                bool isRunning = state.LifecycleState == RuntimeLifecycleState.Running;
+                DennokoBlockUI.Show(_runningBanner, isRunning);
+                if (_runningBannerState != null) _runningBannerState.text = Localization.Get(lang, "StatusRunning");
+                if (_runningBannerDetail != null) _runningBannerDetail.text = Localization.Get(lang, "RunningBannerDetail");
+
+                // 管理対象 / 外部 Inspector 一覧
+                var managed = state.GetManagedAliveWindowsOrdered();
+                var participating = state.GetParticipatingWindowsOrdered();
+                var external = state.Windows.Where(w => !w.IsManaged && w.IsAlive).OrderBy(w => w.FixedDisplayNumber).ToArray();
+
+                if (_managedCardTitle != null)
+                {
+                    _managedCardTitle.text = Localization.Format(lang, "ManagedInspectors", managed.Count);
+                }
+                if (_refreshButton != null) _refreshButton.tooltip = Localization.Get(lang, "RefreshTooltip");
+                if (_resetLayoutButton != null) _resetLayoutButton.tooltip = Localization.Get(lang, "ResetLayoutTooltip");
+                if (_historyMruHint != null) _historyMruHint.text = Localization.Get(lang, "HistoryMruHint");
+
+                RebuildManagedList(state, managed, participating, lang);
+
+                DennokoBlockUI.Show(_externalCard, external.Length > 0);
+                if (_externalCardTitle != null)
+                {
+                    _externalCardTitle.text = Localization.Format(lang, "ExternalInspectors", external.Length);
+                }
+                if (_externalHint != null) _externalHint.text = Localization.Get(lang, "ExternalHint");
+                RebuildExternalList(external, lang);
+
+                // 詳細設定コントロール同期 & 要約チップ更新
+                SyncAdvancedSettings(settings, lang);
+
+                // フッター & ステータスバー
+                if (_footerInfo != null)
+                {
+                    _footerInfo.text = Localization.Format(lang, "FooterSummary", participating.Count, managed.Count);
+                }
+
+                if (_addInspectorButton != null)
+                {
+                    _addInspectorButton.text = Localization.Get(lang, "AddInspector");
+                    _addInspectorButton.SetEnabled(state.Capabilities.CanCreateWindow);
+                }
+
+                if (_primaryToggleButton != null)
+                {
+                    bool active = state.LifecycleState == RuntimeLifecycleState.Running || state.LifecycleState == RuntimeLifecycleState.Starting;
+                    _primaryToggleButton.text = Localization.Get(lang, active ? "Stop" : "Start");
+                    bool canClick = active || ((state.LifecycleState == RuntimeLifecycleState.Off || state.LifecycleState == RuntimeLifecycleState.Suspended)
+                        && state.Capabilities.SupportsRotation);
+                    _primaryToggleButton.SetEnabled(canClick);
+                }
+
+                UpdateStatusBar(snapshot, state, lang);
+            }
+            finally
+            {
+                _suppressControlCallbacks = false;
+            }
+        }
+
+        private void RebuildManagedList(
+            ManagerState state,
+            IReadOnlyList<WindowRecord> managed,
+            IReadOnlyList<WindowRecord> participating,
+            string lang)
+        {
+            if (_managedList == null) return;
+            _managedList.Clear();
+
+            bool isEmpty = managed.Count == 0;
+            DennokoBlockUI.Show(_managedEmpty, isEmpty);
+            if (_managedEmptyMessage != null) _managedEmptyMessage.text = Localization.Get(lang, "NoManagedInspectors");
+            if (_managedEmptyAdd != null)
+            {
+                _managedEmptyAdd.text = Localization.Get(lang, "AddInspector");
+                _managedEmptyAdd.SetEnabled(state.Capabilities.CanCreateWindow);
+            }
+
+            if (isEmpty) return;
+
             var roleSlotMap = new Dictionary<WindowKey, int>();
             for (int i = 0; i < participating.Count; i++)
             {
                 roleSlotMap[participating[i].Key] = i;
             }
 
-            WindowKey? cycleNextKey = null;
-            if (state.Settings.Mode == RotationMode.Cycle && participating.Count > 0)
+            for (int i = 0; i < managed.Count; i++)
             {
-                cycleNextKey = participating
-                    .OrderBy(w => w.LastSuccessSequence)
-                    .ThenBy(w => w.RoleOrder)
-                    .ThenBy(w => w.FixedDisplayNumber)
-                    .First().Key;
-            }
+                var w = managed[i];
+                int rowIndex = i;
+                var row = new VisualElement();
+                row.AddToClassList("imv2-row");
 
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField(Localization.Format(lang, "ManagedInspectors", managed.Count), EditorStyles.boldLabel);
-            GUILayout.FlexibleSpace();
-            if (GUILayout.Button(Localization.Get(lang, "Refresh"), EditorStyles.miniButton, GUILayout.Width(64)))
-            {
-                coordinator.EnqueueSynchronizeWindows();
-            }
-            if (GUILayout.Button(Localization.Get(lang, "ResetLayout"), EditorStyles.miniButton, GUILayout.Width(130)))
-            {
-                coordinator.EnqueueResetLayout();
-            }
-            EditorGUILayout.EndHorizontal();
+                if (w.IsFaultIsolated) row.AddToClassList("imv2-row--fault");
+                else if (w.IsExplicitlyExcluded) row.AddToClassList("imv2-row--excluded");
+                else if (w.IsManuallyUnlocked) row.AddToClassList("imv2-row--unlocked");
+                else if (w.CanParticipate && state.LifecycleState == RuntimeLifecycleState.Running) row.AddToClassList("imv2-row--participating");
 
-            if (managed.Count == 0)
-            {
-                EditorGUILayout.HelpBox(Localization.Get(lang, "NoManagedInspectors"), MessageType.Info);
-            }
-            else
-            {
-                for (int i = 0; i < managed.Count; i++)
+                var numLabel = new Label("#" + w.FixedDisplayNumber);
+                numLabel.AddToClassList("imv2-row__num");
+                row.Add(numLabel);
+
+                string roleText = "-";
+                bool isLatest = false;
+                if (w.CanParticipate && roleSlotMap.TryGetValue(w.Key, out int slot))
                 {
-                    var w = managed[i];
-                    DrawManagedWindowRow(state, w, i, managed.Count, roleSlotMap, cycleNextKey, lang);
+                    isLatest = slot == 0;
+                    roleText = isLatest ? Localization.Get(lang, "RoleLatest") : ("-" + slot);
                 }
-            }
+                var roleLabel = new Label(roleText);
+                roleLabel.AddToClassList("imv2-row__role");
+                if (isLatest) roleLabel.AddToClassList("imv2-row__role--latest");
+                row.Add(roleLabel);
 
-            if (external.Length > 0)
-            {
-                EditorGUILayout.Space(8);
-                EditorGUILayout.LabelField(Localization.Format(lang, "ExternalInspectors", external.Length), EditorStyles.boldLabel);
-                for (int i = 0; i < external.Length; i++)
+                var mainCol = new VisualElement();
+                mainCol.AddToClassList("imv2-row__main");
+
+                string targetName = w.AssignedSelection != null && !w.AssignedSelection.IsEmpty
+                    ? w.AssignedSelection.BuildDisplaySummary()
+                    : (string.IsNullOrEmpty(w.ObservedRepresentativeName) ? Localization.Get(lang, "EmptyTarget") : w.ObservedRepresentativeName);
+
+                var targetLabel = new Label(targetName);
+                targetLabel.AddToClassList("imv2-row__target");
+                mainCol.Add(targetLabel);
+
+                string statusPart = GetWindowStatusText(w, lang);
+                if (w.AssignmentLabel == AssignmentLabel.InitialDisplay)
                 {
-                    var ext = external[i];
-                    EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-                    GUILayout.Label("EXT", EditorStyles.miniBoldLabel, GUILayout.Width(32));
-                    GUILayout.Label(ext.ObservedLocked ? "🔒" : "🔓", GUILayout.Width(22));
-                    GUILayout.Label(string.IsNullOrEmpty(ext.ObservedRepresentativeName) ? "(Inspector)" : ext.ObservedRepresentativeName, EditorStyles.label);
-                    GUILayout.FlexibleSpace();
-                    if (GUILayout.Button(Localization.Get(lang, "Adopt"), EditorStyles.miniButton, GUILayout.Width(80)))
-                    {
-                        coordinator.EnqueueAdoptInspector(ext.Key);
-                    }
-                    if (GUILayout.Button(Localization.Get(lang, "BtnFocus"), EditorStyles.miniButton, GUILayout.Width(48)))
-                    {
-                        coordinator.EnqueueFocusInspector(ext.Key);
-                    }
-                    EditorGUILayout.EndHorizontal();
+                    statusPart += " · " + Localization.Get(lang, "LabelInitialDisplay");
                 }
-            }
+                else if (w.AssignmentLabel == AssignmentLabel.HistoryUnassigned)
+                {
+                    statusPart += " · " + Localization.Get(lang, "LabelHistoryUnassigned");
+                }
+                if (w.IsFaultIsolated && !string.IsNullOrEmpty(w.FaultReason))
+                {
+                    statusPart += " · " + w.FaultReason;
+                }
 
-            EditorGUILayout.Space(6);
-            EditorGUILayout.LabelField(Localization.Get(lang, "ManualUnlockHint"), EditorStyles.miniLabel);
+                var subLabel = new Label(statusPart);
+                subLabel.AddToClassList("imv2-row__sub");
+                if (w.IsFaultIsolated) subLabel.AddToClassList("imv2-row__sub--error");
+                else if (w.IsExplicitlyExcluded || w.IsManuallyUnlocked) subLabel.AddToClassList("imv2-row__sub--warning");
+                mainCol.Add(subLabel);
+
+                row.Add(mainCol);
+
+                var actions = new VisualElement();
+                actions.AddToClassList("imv2-row__actions");
+
+                var capturedKey = w.Key;
+
+                var upBtn = new Button(() => _host?.Coordinator.EnqueueReorderWindow(capturedKey, rowIndex - 1))
+                {
+                    text = "▲",
+                    tooltip = Localization.Get(lang, "BtnUpTooltip")
+                };
+                upBtn.AddToClassList("imv2-row-btn");
+                upBtn.SetEnabled(rowIndex > 0);
+                actions.Add(upBtn);
+
+                var downBtn = new Button(() => _host?.Coordinator.EnqueueReorderWindow(capturedKey, rowIndex + 1))
+                {
+                    text = "▼",
+                    tooltip = Localization.Get(lang, "BtnDownTooltip")
+                };
+                downBtn.AddToClassList("imv2-row-btn");
+                downBtn.SetEnabled(rowIndex < managed.Count - 1);
+                actions.Add(downBtn);
+
+                var lockBtn = new Button(() => _host?.Coordinator.EnqueueToggleLock(capturedKey))
+                {
+                    text = Localization.Get(lang, w.ObservedLocked ? "BtnLock" : "BtnUnlock")
+                };
+                lockBtn.AddToClassList("imv2-row-btn");
+                if (w.ObservedLocked) lockBtn.AddToClassList("imv2-row-btn--lock-on");
+                lockBtn.SetEnabled(state.Capabilities.CanWriteLock);
+                actions.Add(lockBtn);
+
+                bool nextExcluded = !w.IsExplicitlyExcluded;
+                var exBtn = new Button(() => _host?.Coordinator.EnqueueSetExcluded(capturedKey, nextExcluded))
+                {
+                    text = Localization.Get(lang, w.IsExplicitlyExcluded ? "BtnInclude" : "BtnExclude")
+                };
+                exBtn.AddToClassList("imv2-row-btn");
+                if (w.IsExplicitlyExcluded) exBtn.AddToClassList("imv2-row-btn--excluded");
+                actions.Add(exBtn);
+
+                var focusBtn = new Button(() => _host?.Coordinator.EnqueueFocusInspector(capturedKey))
+                {
+                    text = Localization.Get(lang, "BtnFocus")
+                };
+                focusBtn.AddToClassList("imv2-row-btn");
+                actions.Add(focusBtn);
+
+                var closeBtn = new Button(() => _host?.Coordinator.EnqueueCloseInspector(capturedKey))
+                {
+                    text = "×",
+                    tooltip = Localization.Get(lang, "BtnCloseTooltip")
+                };
+                closeBtn.AddToClassList("imv2-row-btn");
+                closeBtn.SetEnabled(state.Capabilities.CanCloseWindow);
+                actions.Add(closeBtn);
+
+                row.Add(actions);
+                _managedList.Add(row);
+            }
         }
 
-        private void DrawManagedWindowRow(
-            ManagerState state,
-            WindowRecord w,
-            int index,
-            int totalManaged,
-            Dictionary<WindowKey, int> roleSlotMap,
-            WindowKey? cycleNextKey,
-            string lang)
+        private void RebuildExternalList(WindowRecord[] external, string lang)
         {
-            var coordinator = _host.Coordinator;
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            if (_externalList == null) return;
+            _externalList.Clear();
 
-            EditorGUILayout.BeginHorizontal();
-
-            // Fixed Display Number (#N) — never changes on reorder!
-            GUILayout.Label("#" + w.FixedDisplayNumber, EditorStyles.boldLabel, GUILayout.Width(30));
-
-            // Role badge
-            string roleBadge = "-";
-            if (w.CanParticipate)
+            for (int i = 0; i < external.Length; i++)
             {
-                if (state.Settings.Mode == RotationMode.History && roleSlotMap.TryGetValue(w.Key, out int slot))
+                var ext = external[i];
+                var capturedKey = ext.Key;
+
+                var row = new VisualElement();
+                row.AddToClassList("imv2-row");
+
+                var badge = new Label("EXT");
+                badge.AddToClassList("imv2-row__num");
+                row.Add(badge);
+
+                var mainCol = new VisualElement();
+                mainCol.AddToClassList("imv2-row__main");
+                var nameLabel = new Label(string.IsNullOrEmpty(ext.ObservedRepresentativeName) ? "(Inspector)" : ext.ObservedRepresentativeName);
+                nameLabel.AddToClassList("imv2-row__target");
+                mainCol.Add(nameLabel);
+                row.Add(mainCol);
+
+                var actions = new VisualElement();
+                actions.AddToClassList("imv2-row__actions");
+
+                var adoptBtn = new Button(() => _host?.Coordinator.EnqueueAdoptInspector(capturedKey))
                 {
-                    roleBadge = slot == 0 ? Localization.Get(lang, "RoleLatest") : ("-" + slot);
-                }
-                else if (state.Settings.Mode == RotationMode.Cycle)
+                    text = Localization.Get(lang, "Adopt")
+                };
+                adoptBtn.AddToClassList("imv2-row-btn");
+                actions.Add(adoptBtn);
+
+                var focusBtn = new Button(() => _host?.Coordinator.EnqueueFocusInspector(capturedKey))
                 {
-                    roleBadge = cycleNextKey.HasValue && cycleNextKey.Value == w.Key
-                        ? Localization.Get(lang, "RoleCycleNext")
-                        : Localization.Get(lang, "RoleCycle");
-                }
+                    text = Localization.Get(lang, "BtnFocus")
+                };
+                focusBtn.AddToClassList("imv2-row-btn");
+                actions.Add(focusBtn);
+
+                row.Add(actions);
+                _externalList.Add(row);
             }
-            GUILayout.Label("[" + roleBadge + "]", EditorStyles.miniLabel, GUILayout.Width(52));
-
-            // Participation / Exclusion / Unlock / Fault status
-            string statusText = GetWindowStatusText(w, lang);
-            GUILayout.Label(statusText, EditorStyles.miniLabel, GUILayout.Width(64));
-
-            // Target display name + assignment label
-            string targetSummary = w.AssignedSelection != null && !w.AssignedSelection.IsEmpty
-                ? w.AssignedSelection.BuildDisplaySummary()
-                : (string.IsNullOrEmpty(w.ObservedRepresentativeName) ? "(Empty)" : w.ObservedRepresentativeName);
-
-            if (w.AssignmentLabel == AssignmentLabel.InitialDisplay)
-            {
-                targetSummary += " [" + Localization.Get(lang, "LabelInitialDisplay") + "]";
-            }
-            else if (w.AssignmentLabel == AssignmentLabel.HistoryUnassigned)
-            {
-                targetSummary += " [" + Localization.Get(lang, "LabelHistoryUnassigned") + "]";
-            }
-
-            GUILayout.Label(targetSummary, EditorStyles.label, GUILayout.ExpandWidth(true));
-
-            // Reorder Up / Down (uses WindowKey!)
-            using (new EditorGUI.DisabledScope(index <= 0))
-            {
-                if (GUILayout.Button("▲", EditorStyles.miniButtonLeft, GUILayout.Width(22)))
-                {
-                    coordinator.EnqueueReorderWindow(w.Key, index - 1);
-                }
-            }
-            using (new EditorGUI.DisabledScope(index >= totalManaged - 1))
-            {
-                if (GUILayout.Button("▼", EditorStyles.miniButtonRight, GUILayout.Width(22)))
-                {
-                    coordinator.EnqueueReorderWindow(w.Key, index + 1);
-                }
-            }
-
-            // Lock toggle (shows verified actual ObservedLocked state!)
-            using (new EditorGUI.DisabledScope(!state.Capabilities.CanWriteLock))
-            {
-                string lockGlyph = w.ObservedLocked ? Localization.Get(lang, "BtnLock") : Localization.Get(lang, "BtnUnlock");
-                if (GUILayout.Button(lockGlyph, EditorStyles.miniButton, GUILayout.Width(28)))
-                {
-                    coordinator.EnqueueToggleLock(w.Key);
-                }
-            }
-
-            // Explicit Exclude / Include toggle
-            string exLabel = w.IsExplicitlyExcluded ? Localization.Get(lang, "BtnInclude") : Localization.Get(lang, "BtnExclude");
-            if (GUILayout.Button(exLabel, EditorStyles.miniButton, GUILayout.Width(48)))
-            {
-                coordinator.EnqueueSetExcluded(w.Key, !w.IsExplicitlyExcluded);
-            }
-
-            // Focus
-            if (GUILayout.Button(Localization.Get(lang, "BtnFocus"), EditorStyles.miniButton, GUILayout.Width(42)))
-            {
-                coordinator.EnqueueFocusInspector(w.Key);
-            }
-
-            // Close (restores lease before closing)
-            using (new EditorGUI.DisabledScope(!state.Capabilities.CanCloseWindow))
-            {
-                if (GUILayout.Button(Localization.Get(lang, "BtnClose"), EditorStyles.miniButton, GUILayout.Width(22)))
-                {
-                    coordinator.EnqueueCloseInspector(w.Key);
-                }
-            }
-
-            EditorGUILayout.EndHorizontal();
-
-            if (w.IsFaultIsolated && !string.IsNullOrEmpty(w.FaultReason))
-            {
-                EditorGUILayout.LabelField("Fault: " + w.FaultReason, EditorStyles.miniLabel);
-            }
-
-            EditorGUILayout.EndVertical();
         }
 
-        private void DrawHistoryTab(ManagerState state, string lang)
+        private void SyncAdvancedSettings(ManagerSettings settings, string lang)
         {
-            var coordinator = _host.Coordinator;
-            var entries = state.NavigationHistory.Entries;
-            int cursor = state.NavigationHistory.CursorIndex;
+            if (_advancedDetailsTitle != null) _advancedDetailsTitle.text = Localization.Get(lang, "AdvancedSettings");
 
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField(Localization.Get(lang, "DragHint"), EditorStyles.miniLabel);
-            GUILayout.FlexibleSpace();
-            using (new EditorGUI.DisabledScope(entries.Count == 0))
+            if (_maxHistorySlider != null)
             {
-                if (GUILayout.Button(Localization.Get(lang, "ClearHistory"), EditorStyles.miniButton, GUILayout.Width(96)))
+                _maxHistorySlider.label = Localization.Get(lang, "MaxRotHistory");
+                _maxHistorySlider.SetValueWithoutNotify(settings.MaxRotationHistory);
+            }
+            if (_recordSceneToggle != null)
+            {
+                _recordSceneToggle.text = Localization.Get(lang, "RecordSceneObjects");
+                _recordSceneToggle.SetValueWithoutNotify(settings.RecordSceneObjects);
+            }
+            if (_recordAssetsToggle != null)
+            {
+                _recordAssetsToggle.text = Localization.Get(lang, "RecordAssets");
+                _recordAssetsToggle.SetValueWithoutNotify(settings.RecordAssets);
+            }
+            if (_showOverlaysToggle != null)
+            {
+                _showOverlaysToggle.text = Localization.Get(lang, "ShowOverlays");
+                _showOverlaysToggle.SetValueWithoutNotify(settings.ShowInspectorOverlays);
+            }
+            if (_blockedCategoriesTitle != null) _blockedCategoriesTitle.text = Localization.Get(lang, "BlockedCategoriesHeader");
+            if (_blockedCategoriesHint != null) _blockedCategoriesHint.text = Localization.Get(lang, "BlockedCategoriesHint");
+
+            foreach (var kvp in _categoryToggles)
+            {
+                kvp.Value.text = Localization.CategoryLabel(lang, kvp.Key);
+                kvp.Value.SetValueWithoutNotify(settings.BlockedCategories.Contains(kvp.Key));
+            }
+
+            // 閉じている間の要約チップ (.dennoko-summary-chip: 初期値と異なる項目だけ表示)
+            if (_advancedDetailsChips != null)
+            {
+                _advancedDetailsChips.Clear();
+                if (settings.BlockedCategories.Count > 0)
                 {
-                    coordinator.EnqueueClearNavigationHistory();
+                    _advancedDetailsChips.Add(DennokoBlockUI.Chip(null, Localization.Format(lang, "ChipBlocked", settings.BlockedCategories.Count)));
+                }
+                if (!settings.RecordSceneObjects)
+                {
+                    _advancedDetailsChips.Add(DennokoBlockUI.Chip(null, Localization.Get(lang, "ChipSceneOff")));
+                }
+                if (!settings.RecordAssets)
+                {
+                    _advancedDetailsChips.Add(DennokoBlockUI.Chip(null, Localization.Get(lang, "ChipAssetsOff")));
+                }
+                if (!settings.ShowInspectorOverlays)
+                {
+                    _advancedDetailsChips.Add(DennokoBlockUI.Chip(null, Localization.Get(lang, "ChipOverlayOff")));
+                }
+                if (settings.MaxRotationHistory != 20)
+                {
+                    _advancedDetailsChips.Add(DennokoBlockUI.Chip(null, Localization.Format(lang, "ChipHistory", settings.MaxRotationHistory)));
                 }
             }
-            EditorGUILayout.EndHorizontal();
+        }
 
-            if (entries.Count == 0)
+        private void UpdateStatusBar(UiSnapshot snapshot, ManagerState state, string lang)
+        {
+            if (_status == null) return;
+
+            if (snapshot.HasPendingVerification)
             {
-                EditorGUILayout.HelpBox(Localization.Get(lang, "HistoryEmpty"), MessageType.Info);
+                _status.Set(Localization.Get(lang, "PendingVerifyBanner"), DennokoStatusType.Busy);
                 return;
             }
 
-            // Display newest first
-            for (int i = entries.Count - 1; i >= 0; i--)
+            if (state.LifecycleState == RuntimeLifecycleState.Faulted)
             {
-                var entry = entries[i];
-                bool isCurrent = i == cursor;
-                var rowRect = EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-
-                string marker = isCurrent ? "●" : " ";
-                GUILayout.Label(marker, EditorStyles.boldLabel, GUILayout.Width(16));
-                GUILayout.Label("#" + (i + 1), EditorStyles.miniLabel, GUILayout.Width(28));
-                GUILayout.Label(entry.BuildDisplaySummary(), isCurrent ? EditorStyles.boldLabel : EditorStyles.label, GUILayout.ExpandWidth(true));
-
-                if (GUILayout.Button(Localization.Get(lang, "BtnSelect"), EditorStyles.miniButton, GUILayout.Width(52)))
-                {
-                    coordinator.EnqueueNavigateToIndex(i);
-                }
-
-                EditorGUILayout.EndHorizontal();
-
-                // Support drag-and-drop from history rows (Section 7: verifies ALL targets resolve before starting drag!)
-                HandleHistoryRowDrag(rowRect, i, entry);
-            }
-        }
-
-        private void HandleHistoryRowDrag(Rect rowRect, int index, SelectionSnapshot entry)
-        {
-            var evt = Event.current;
-            if (evt.type == EventType.MouseDown && evt.button == 0 && rowRect.Contains(evt.mousePosition))
-            {
-                _draggingHistoryIndex = index;
-                _dragStartMousePos = evt.mousePosition;
-            }
-            else if (evt.type == EventType.MouseDrag && _draggingHistoryIndex == index)
-            {
-                if ((evt.mousePosition - _dragStartMousePos).magnitude > 6f)
-                {
-                    _draggingHistoryIndex = -1;
-                    if (_host.SelectionAdapter.TryStartDrag(entry.GetOrderedKeys(), entry.BuildDisplaySummary(), out string err))
-                    {
-                        evt.Use();
-                    }
-                    else
-                    {
-                        Debug.LogWarning("[InspectorManagerV2] Drag aborted: " + err);
-                    }
-                }
-            }
-            else if (evt.type == EventType.MouseUp)
-            {
-                _draggingHistoryIndex = -1;
-            }
-        }
-
-        private void DrawFavoritesTab(ManagerState state, string lang)
-        {
-            var coordinator = _host.Coordinator;
-
-            EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button(Localization.Get(lang, "AddCurrentFavorite"), GUILayout.Height(22)))
-            {
-                coordinator.EnqueueAddFavoriteFromCurrentSelection();
-            }
-            if (GUILayout.Button(Localization.Get(lang, "Refresh"), GUILayout.Width(64), GUILayout.Height(22)))
-            {
-                coordinator.EnqueueInvalidateEnvironmentCaches(sceneSaved: false);
-            }
-            EditorGUILayout.EndHorizontal();
-
-            // Drag & Drop zone to add favorites
-            Rect dropRect = GUILayoutUtility.GetRect(0f, 34f, GUILayout.ExpandWidth(true));
-            GUI.Box(dropRect, Localization.Get(lang, "FavoriteDropZone"), EditorStyles.helpBox);
-            HandleFavoriteDropZone(dropRect);
-
-            EditorGUILayout.Space(4);
-
-            if (state.Favorites.Count == 0)
-            {
-                EditorGUILayout.HelpBox(Localization.Get(lang, "FavoritesEmpty"), MessageType.Info);
+                _status.Set(Localization.Get(lang, "StatusFaulted"), DennokoStatusType.Error);
                 return;
             }
 
-            for (int i = 0; i < state.Favorites.Count; i++)
+            if (!string.IsNullOrEmpty(state.StatusNotice)
+                && state.StatusNotice != "Running"
+                && state.StatusNotice != "Off")
             {
-                var fav = state.Favorites[i];
-                EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-
-                string statusLabel = GetFavoriteStatusLabel(fav.ResolutionState, lang);
-                GUILayout.Label("[" + statusLabel + "]", EditorStyles.miniLabel, GUILayout.Width(92));
-                GUILayout.Label(fav.DisplayNameCache, EditorStyles.label, GUILayout.ExpandWidth(true));
-
-                using (new EditorGUI.DisabledScope(i <= 0))
-                {
-                    if (GUILayout.Button("▲", EditorStyles.miniButtonLeft, GUILayout.Width(22)))
-                    {
-                        coordinator.EnqueueReorderFavorite(fav.FavoriteId, i - 1);
-                    }
-                }
-                using (new EditorGUI.DisabledScope(i >= state.Favorites.Count - 1))
-                {
-                    if (GUILayout.Button("▼", EditorStyles.miniButtonRight, GUILayout.Width(22)))
-                    {
-                        coordinator.EnqueueReorderFavorite(fav.FavoriteId, i + 1);
-                    }
-                }
-
-                bool selectable = fav.ResolutionState == FavoriteResolutionState.Resolved || fav.ResolutionState == FavoriteResolutionState.TemporaryUnsaved;
-                using (new EditorGUI.DisabledScope(!selectable))
-                {
-                    if (GUILayout.Button(Localization.Get(lang, "BtnSelect"), EditorStyles.miniButton, GUILayout.Width(46)))
-                    {
-                        coordinator.EnqueueSelectFavorite(fav.FavoriteId);
-                    }
-                    if (GUILayout.Button(Localization.Get(lang, "BtnPing"), EditorStyles.miniButton, GUILayout.Width(42)))
-                    {
-                        coordinator.EnqueuePingFavorite(fav.FavoriteId);
-                    }
-                }
-
-                if (GUILayout.Button(Localization.Get(lang, "BtnRemove"), EditorStyles.miniButton, GUILayout.Width(48)))
-                {
-                    coordinator.EnqueueRemoveFavorite(fav.FavoriteId);
-                }
-
-                EditorGUILayout.EndHorizontal();
-            }
-        }
-
-        private void HandleFavoriteDropZone(Rect dropRect)
-        {
-            var evt = Event.current;
-            if (!dropRect.Contains(evt.mousePosition)) return;
-
-            if (evt.type == EventType.DragUpdated || evt.type == EventType.DragPerform)
-            {
-                if (DragAndDrop.objectReferences != null && DragAndDrop.objectReferences.Length > 0)
-                {
-                    DragAndDrop.visualMode = DragAndDropVisualMode.Copy;
-                    if (evt.type == EventType.DragPerform)
-                    {
-                        DragAndDrop.AcceptDrag();
-                        for (int i = 0; i < DragAndDrop.objectReferences.Length; i++)
-                        {
-                            var obj = DragAndDrop.objectReferences[i];
-                            if (obj == null) continue;
-                            var key = _host.GetObjectRefKey(obj);
-                            if (key.IsValid)
-                            {
-                                _host.Coordinator.EnqueueAddFavoriteObject(key);
-                            }
-                        }
-                    }
-                    evt.Use();
-                }
-            }
-        }
-
-        private void DrawSettingsAndDiagnosticsTab(UiSnapshot snapshot, ManagerState state, string lang)
-        {
-            var coordinator = _host.Coordinator;
-            var s = state.Settings;
-
-            EditorGUILayout.LabelField(Localization.Get(lang, "SettingsHeader"), EditorStyles.boldLabel);
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-
-            // Language
-            int langIdx = string.Equals(s.Language, "en", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
-            int nextLangIdx = EditorGUILayout.Popup(Localization.Get(lang, "Language"), langIdx, new[] { "日本語", "English" });
-            if (nextLangIdx != langIdx)
-            {
-                coordinator.EnqueueUpdateSettings(s.WithNextRevision(language: nextLangIdx == 0 ? "ja" : "en"));
+                var statusType = !string.IsNullOrEmpty(state.LastError)
+                    ? DennokoStatusType.Warning
+                    : DennokoStatusType.Info;
+                _status.Set(state.StatusNotice, statusType);
+                return;
             }
 
-            int maxNav = EditorGUILayout.IntSlider(Localization.Get(lang, "MaxNavHistory"), s.MaxNavigationHistory, 10, 500);
-            if (maxNav != s.MaxNavigationHistory)
-            {
-                coordinator.EnqueueUpdateSettings(s.WithNextRevision(maxNavigationHistory: maxNav));
-            }
-
-            int maxRot = EditorGUILayout.IntSlider(Localization.Get(lang, "MaxRotHistory"), s.MaxRotationHistory, 4, 200);
-            if (maxRot != s.MaxRotationHistory)
-            {
-                coordinator.EnqueueUpdateSettings(s.WithNextRevision(maxRotationHistory: maxRot));
-            }
-
-            bool recScene = EditorGUILayout.ToggleLeft(Localization.Get(lang, "RecordSceneObjects"), s.RecordSceneObjects);
-            if (recScene != s.RecordSceneObjects)
-            {
-                coordinator.EnqueueUpdateSettings(s.WithNextRevision(recordSceneObjects: recScene));
-            }
-
-            bool recAssets = EditorGUILayout.ToggleLeft(Localization.Get(lang, "RecordAssets"), s.RecordAssets);
-            if (recAssets != s.RecordAssets)
-            {
-                coordinator.EnqueueUpdateSettings(s.WithNextRevision(recordAssets: recAssets));
-            }
-
-            bool autoFocus = EditorGUILayout.ToggleLeft(Localization.Get(lang, "AutoFocus"), s.AutoFocusUpdatedInspector);
-            if (autoFocus != s.AutoFocusUpdatedInspector)
-            {
-                coordinator.EnqueueUpdateSettings(s.WithNextRevision(autoFocusUpdatedInspector: autoFocus));
-            }
-
-            bool showOverlays = EditorGUILayout.ToggleLeft(Localization.Get(lang, "ShowOverlays"), s.ShowInspectorOverlays);
-            if (showOverlays != s.ShowInspectorOverlays)
-            {
-                coordinator.EnqueueUpdateSettings(s.WithNextRevision(showInspectorOverlays: showOverlays));
-            }
-
-            bool autoCleanup = EditorGUILayout.ToggleLeft(Localization.Get(lang, "AutoCleanupFavs"), s.AutoCleanupMissingFavorites);
-            if (autoCleanup != s.AutoCleanupMissingFavorites)
-            {
-                coordinator.EnqueueUpdateSettings(s.WithNextRevision(autoCleanupMissingFavorites: autoCleanup));
-            }
-
-            EditorGUILayout.Space(4);
-            if (GUILayout.Button(Localization.Get(lang, "ResetSettings"), GUILayout.Width(190)))
-            {
-                coordinator.EnqueueResetSettings();
-            }
-
-            EditorGUILayout.EndVertical();
-
-            EditorGUILayout.Space(6);
-            EditorGUILayout.LabelField(Localization.Get(lang, "BlockedCategoriesHeader"), EditorStyles.boldLabel);
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField(Localization.Get(lang, "BlockedCategoriesHint"), EditorStyles.wordWrappedMiniLabel);
-
-            int cols = 3;
-            for (int i = 0; i < s_configurableCategories.Length; i += cols)
-            {
-                EditorGUILayout.BeginHorizontal();
-                for (int c = 0; c < cols && i + c < s_configurableCategories.Length; c++)
-                {
-                    var cat = s_configurableCategories[i + c];
-                    bool isBlocked = s.BlockedCategories.Contains(cat);
-                    bool nextBlocked = EditorGUILayout.ToggleLeft(Localization.CategoryLabel(lang, cat), isBlocked, GUILayout.MinWidth(100));
-                    if (nextBlocked != isBlocked)
-                    {
-                        var nextSet = new HashSet<ObjectCategory>(s.BlockedCategories);
-                        if (nextBlocked) nextSet.Add(cat);
-                        else nextSet.Remove(cat);
-                        coordinator.EnqueueUpdateSettings(s.WithNextRevision(blockedCategories: nextSet));
-                    }
-                }
-                EditorGUILayout.EndHorizontal();
-            }
-            EditorGUILayout.EndVertical();
-
-            EditorGUILayout.Space(8);
-            DrawDiagnosticsSection(snapshot, state, lang);
-        }
-
-        private void DrawDiagnosticsSection(UiSnapshot snapshot, ManagerState state, string lang)
-        {
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField(Localization.Get(lang, "DiagnosticsHeader"), EditorStyles.boldLabel);
-            GUILayout.FlexibleSpace();
-            if (GUILayout.Button(Localization.Get(lang, "CopyDiagnostics"), EditorStyles.miniButton, GUILayout.Width(120)))
-            {
-                EditorGUIUtility.systemCopyBuffer = BuildDiagnosticsReport(snapshot);
-            }
-            EditorGUILayout.EndHorizontal();
-
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            var caps = state.Capabilities;
-            var m = snapshot.Metrics;
-            EditorGUILayout.LabelField("State: " + state.LifecycleState + " | Gen: " + state.Generation + " | SettingsRev: " + state.Settings.SettingsRevision);
-            EditorGUILayout.LabelField("Capabilities: " + caps.DiagnosticSummary, EditorStyles.wordWrappedMiniLabel);
-            EditorGUILayout.LabelField(
-                string.Format("SupportsRotation={0}, CombinedAPI={1}, ActiveTarget={2}, EmptyComp={3}",
-                    caps.SupportsRotation,
-                    caps.UsesWindowCombinedTargetLockApi,
-                    caps.SupportsActiveTargetSelection,
-                    caps.SupportsEmptyTargetCompensation),
-                EditorStyles.miniLabel);
-            EditorGUILayout.LabelField(
-                string.Format("Metrics: Queue={0} (Peak={1}), Plans={2}, Skips={3}, LastExec={4:0.#}ms, LastLatency={5:0.#}ms",
-                    m.CurrentQueueDepth, m.PeakQueueDepth, m.TotalCommittedPlans, m.TotalWriteSkips, m.LastPlanExecutionMs, m.LastSelectionToCommitMs),
-                EditorStyles.miniLabel);
-
-            if (state.Leases.Count > 0)
-            {
-                EditorGUILayout.LabelField("Active/Pending Leases (" + state.Leases.Count + "):", EditorStyles.miniBoldLabel);
-                foreach (var kvp in state.Leases)
-                {
-                    var l = kvp.Value;
-                    EditorGUILayout.LabelField(
-                        "  " + l.WindowKey + " | orig=" + l.OriginalLocked + " | status=" + l.RestorationStatus + (string.IsNullOrEmpty(l.LastError) ? "" : " | err=" + l.LastError),
-                        EditorStyles.miniLabel);
-                }
-            }
-
-            EditorGUILayout.Space(4);
-            _diagScrollPos = EditorGUILayout.BeginScrollView(_diagScrollPos, GUILayout.Height(110));
-            for (int i = snapshot.RecentLogs.Count - 1; i >= 0; i--)
-            {
-                var log = snapshot.RecentLogs[i];
-                string repeat = log.RepeatCount > 1 ? " (x" + log.RepeatCount + ")" : string.Empty;
-                string line = string.Format("[{0}] g{1} {2} {3}: {4}{5}",
-                    log.IsError ? "ERR" : "INF",
-                    log.Generation,
-                    log.Stage,
-                    log.WindowKey.HasValue ? log.WindowKey.Value.Value : "-",
-                    log.Message,
-                    repeat);
-                EditorGUILayout.LabelField(line, EditorStyles.wordWrappedMiniLabel);
-            }
-            EditorGUILayout.EndScrollView();
-            EditorGUILayout.EndVertical();
-        }
-
-        private static string BuildDiagnosticsReport(UiSnapshot snapshot)
-        {
-            var state = snapshot.State;
-            var sb = new StringBuilder();
-            sb.AppendLine("=== Inspector Manager V2 Diagnostics ===");
-            sb.AppendLine("Unity: " + UnityEngine.Application.unityVersion);
-            sb.AppendLine("Lifecycle: " + state.LifecycleState + " (Gen=" + state.Generation + ", SettingsRev=" + state.Settings.SettingsRevision + ")");
-            sb.AppendLine("Capabilities: " + state.Capabilities.DiagnosticSummary);
-            sb.AppendLine("SupportsRotation: " + state.Capabilities.SupportsRotation);
-            sb.AppendLine("Windows: " + state.Windows.Count + ", Leases: " + state.Leases.Count);
-            sb.AppendLine("Metrics: Queue=" + snapshot.Metrics.CurrentQueueDepth + ", Peak=" + snapshot.Metrics.PeakQueueDepth + ", Plans=" + snapshot.Metrics.TotalCommittedPlans + ", Skips=" + snapshot.Metrics.TotalWriteSkips);
-            sb.AppendLine("--- Recent Logs ---");
-            foreach (var log in snapshot.RecentLogs)
-            {
-                sb.AppendLine("[" + (log.IsError ? "ERR" : "INF") + "] op=" + log.OperationId + " g=" + log.Generation + " stage=" + log.Stage + " msg=" + log.Message + (log.RepeatCount > 1 ? " x" + log.RepeatCount : ""));
-            }
-            return sb.ToString();
+            string lifecycleText = Localization.LifecycleLabel(lang, state.LifecycleState);
+            _status.Set(lifecycleText, DennokoStatusType.Info);
         }
 
         private static string GetWindowStatusText(WindowRecord w, string lang)
@@ -884,28 +770,18 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
             return Localization.Get(lang, "StateParticipating");
         }
 
-        private static string GetFavoriteStatusLabel(FavoriteResolutionState state, string lang)
+        private static void AddStyleSheet(VisualElement root, string guid)
         {
-            switch (state)
-            {
-                case FavoriteResolutionState.Resolved: return Localization.Get(lang, "FavResolved");
-                case FavoriteResolutionState.TemporaryUnsaved: return Localization.Get(lang, "FavTemporary");
-                case FavoriteResolutionState.SceneUnloaded: return Localization.Get(lang, "FavSceneUnloaded");
-                case FavoriteResolutionState.DeletedOrMissing: return Localization.Get(lang, "FavMissing");
-                default: return Localization.Get(lang, "FavFailed");
-            }
+            var uss = LoadAssetByGuid<StyleSheet>(guid);
+            if (uss != null) root.styleSheets.Add(uss);
+            else Debug.LogWarning("[InspectorManagerWindow] USS が見つかりません。GUID を確認してください: " + guid);
         }
 
-        private static Color GetLifecycleColor(RuntimeLifecycleState state)
+        private static T LoadAssetByGuid<T>(string guid) where T : UnityEngine.Object
         {
-            switch (state)
-            {
-                case RuntimeLifecycleState.Running: return new Color(0.55f, 0.95f, 0.65f);
-                case RuntimeLifecycleState.Paused: return new Color(0.95f, 0.85f, 0.50f);
-                case RuntimeLifecycleState.Faulted: return new Color(1.0f, 0.50f, 0.50f);
-                case RuntimeLifecycleState.Suspended: return new Color(0.70f, 0.78f, 1.0f);
-                default: return Color.white;
-            }
+            if (string.IsNullOrEmpty(guid)) return null;
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+            return string.IsNullOrEmpty(path) ? null : AssetDatabase.LoadAssetAtPath<T>(path);
         }
     }
 }

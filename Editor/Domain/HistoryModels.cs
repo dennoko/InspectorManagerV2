@@ -1,103 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 
 namespace DennokoWorks.InspectorManagerV2.Domain
 {
-    /// <summary>
-    /// Chronological user selection history supporting Back/Forward cursor navigation.
-    /// Empty selections are never recorded. Branching after Back discards forward entries.
-    /// </summary>
-    public sealed class NavigationHistoryState
-    {
-        public static readonly NavigationHistoryState Empty = new NavigationHistoryState(Array.Empty<SelectionSnapshot>(), -1);
-
-        public IReadOnlyList<SelectionSnapshot> Entries { get; }
-        public int CursorIndex { get; }
-
-        public bool CanGoBack => CursorIndex > 0 && Entries.Count > 1;
-        public bool CanGoForward => CursorIndex >= 0 && CursorIndex < Entries.Count - 1;
-        public SelectionSnapshot Current => CursorIndex >= 0 && CursorIndex < Entries.Count ? Entries[CursorIndex] : null;
-
-        public NavigationHistoryState(IReadOnlyList<SelectionSnapshot> entries, int cursorIndex)
-        {
-            Entries = entries ?? Array.Empty<SelectionSnapshot>();
-            if (Entries.Count == 0)
-            {
-                CursorIndex = -1;
-            }
-            else if (cursorIndex < 0)
-            {
-                CursorIndex = 0;
-            }
-            else if (cursorIndex >= Entries.Count)
-            {
-                CursorIndex = Entries.Count - 1;
-            }
-            else
-            {
-                CursorIndex = cursorIndex;
-            }
-        }
-
-        public NavigationHistoryState RecordUserSelection(SelectionSnapshot snapshot, int maxEntries)
-        {
-            if (snapshot == null || snapshot.IsEmpty)
-            {
-                return this;
-            }
-
-            if (maxEntries < 1)
-            {
-                maxEntries = 1;
-            }
-
-            // Do not duplicate immediately identical cursor entry.
-            if (CursorIndex >= 0 && CursorIndex < Entries.Count
-                && Entries[CursorIndex].ComparisonKey == snapshot.ComparisonKey)
-            {
-                return this;
-            }
-
-            var list = new List<SelectionSnapshot>();
-            int copyCount = CursorIndex >= 0 ? Math.Min(CursorIndex + 1, Entries.Count) : 0;
-            for (int i = 0; i < copyCount; i++)
-            {
-                list.Add(Entries[i]);
-            }
-
-            list.Add(snapshot);
-
-            while (list.Count > maxEntries)
-            {
-                list.RemoveAt(0);
-            }
-
-            return new NavigationHistoryState(list.ToArray(), list.Count - 1);
-        }
-
-        public NavigationHistoryState MoveCursorTo(int index)
-        {
-            if (index < 0 || index >= Entries.Count)
-            {
-                return this;
-            }
-
-            return new NavigationHistoryState(Entries, index);
-        }
-
-        public NavigationHistoryState TrimToCapacity(int maxEntries)
-        {
-            if (maxEntries < 1) maxEntries = 1;
-            if (Entries.Count <= maxEntries) return this;
-
-            int excess = Entries.Count - maxEntries;
-            var trimmed = Entries.Skip(excess).ToArray();
-            int newCursor = Math.Max(0, CursorIndex - excess);
-            return new NavigationHistoryState(trimmed, newCursor);
-        }
-    }
-
     public sealed class RotationHistoryEntry
     {
         public SelectionSnapshot Snapshot { get; }
@@ -111,7 +16,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
     }
 
     /// <summary>
-    /// Deduplicated MRU selection list used for History rotation mode.
+    /// Deduplicated MRU selection list used for History mode assignment.
     /// Re-selecting A in A -> B -> A moves A to the front and removes the rear duplicate, yielding [A, B].
     /// </summary>
     public sealed class RotationHistoryState
@@ -197,7 +102,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
 
         public static RotationHistoryState BuildSeeded(
             SelectionSnapshot currentSelection,
-            IReadOnlyList<SelectionSnapshot> navigationHistoryEntries,
             IReadOnlyList<SelectionSnapshot> observedDisplays,
             Func<SelectionSnapshot, bool> isEligible,
             int maxEntries)
@@ -218,20 +122,10 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 list.Add(new RotationHistoryEntry(snapshot, isInitialDisplay));
             }
 
-            // Section 5.3 exact seed priority:
-            // 1. Current selection
+            // Priority 1: Current live selection
             TryAdd(currentSelection, false);
 
-            // 2. Recorded valid selection history (most recent first)
-            if (navigationHistoryEntries != null)
-            {
-                for (int i = navigationHistoryEntries.Count - 1; i >= 0; i--)
-                {
-                    TryAdd(navigationHistoryEntries[i], false);
-                }
-            }
-
-            // 3. Observed actual Inspector displays (distinguished as InitialDisplay)
+            // Priority 2: Observed actual Inspector displays (marked as InitialDisplay)
             if (observedDisplays != null)
             {
                 for (int i = 0; i < observedDisplays.Count; i++)

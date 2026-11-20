@@ -5,14 +5,12 @@ using DennokoWorks.InspectorManagerV2.Domain;
 using DennokoWorks.InspectorManagerV2.Presentation;
 using DennokoWorks.InspectorManagerV2.UnityAdapter;
 using UnityEditor;
-using UnityEngine;
 
 namespace DennokoWorks.InspectorManagerV2.Composition
 {
     /// <summary>
-    /// Composition Root (Section 3 & 9).
-    /// Explicitly assembles the single runtime instance and wires Unity lifecycle ingress and Manager windows.
-    /// Avoids global Service Locator or mutable Event Bus anti-patterns.
+    /// Composition Root.
+    /// Explicitly assembles the single History-mode runtime instance and wires Unity lifecycle ingress and Manager windows.
     /// </summary>
     [InitializeOnLoad]
     public static class InspectorManagerBootstrap
@@ -32,12 +30,6 @@ namespace DennokoWorks.InspectorManagerV2.Composition
             var window = EditorWindow.GetWindow<InspectorManagerWindow>();
             window.AttachHost(s_host);
             window.Show();
-        }
-
-        public static InspectorManagerCoordinator GetCoordinatorForDiagnostics()
-        {
-            EnsureInitialized();
-            return s_host.Coordinator;
         }
 
         private static void EnsureInitialized()
@@ -62,13 +54,12 @@ namespace DennokoWorks.InspectorManagerV2.Composition
             string storageDir = UnityProjectPaths.GetProjectStorageDirectory(projectId);
 
             var clock = new UnityMonotonicClock();
-            var logger = new UnityDiagnosticLogger(clock);
+            var logger = new UnityDiagnosticLogger();
             var sessionStore = new UnitySessionStateStore();
             string editorSessionId = sessionStore.GetEditorSessionId();
 
-            var resolver = new UnityObjectResolver();
-            var selectionAdapter = new UnitySelectionAdapter(resolver);
-            var inspectorAdapter = new InspectorReflectionAdapter(resolver, editorSessionId);
+            var selectionAdapter = new UnitySelectionAdapter();
+            var inspectorAdapter = new InspectorReflectionAdapter(editorSessionId);
             var persistenceStore = new AtomicJsonFileStore(storageDir, projectId);
 
             InspectorManagerCoordinator coordinator = null;
@@ -78,7 +69,6 @@ namespace DennokoWorks.InspectorManagerV2.Composition
                 projectId,
                 inspectorAdapter,
                 selectionAdapter,
-                resolver,
                 persistenceStore,
                 sessionStore,
                 clock,
@@ -87,7 +77,7 @@ namespace DennokoWorks.InspectorManagerV2.Composition
 
             var ingress = new UnityLifecycleIngress(coordinator);
 
-            s_host = new RuntimeHost(coordinator, selectionAdapter, ingress);
+            s_host = new RuntimeHost(coordinator, ingress);
             InspectorManagerWindow.HostProvider = () =>
             {
                 EnsureInitialized();
@@ -134,16 +124,12 @@ namespace DennokoWorks.InspectorManagerV2.Composition
             private bool _disposed;
 
             public InspectorManagerCoordinator Coordinator { get; }
-            public ISelectionAdapter SelectionAdapter { get; }
-            public Func<UnityEngine.Object, ObjectRefKey> GetObjectRefKey => UnityObjectIdHelper.GetObjectRefKey;
 
             public RuntimeHost(
                 InspectorManagerCoordinator coordinator,
-                ISelectionAdapter selectionAdapter,
                 UnityLifecycleIngress ingress)
             {
                 Coordinator = coordinator;
-                SelectionAdapter = selectionAdapter;
                 _ingress = ingress;
             }
 
@@ -162,11 +148,8 @@ namespace DennokoWorks.InspectorManagerV2.Composition
                     _openWindows.Remove(window);
                 }
 
-                // Prune any already-destroyed window references.
                 _openWindows.RemoveWhere(w => w == null);
 
-                // Section 6.2 & 9: When the LAST Manager window is closed by the user (NOT reload/play/quit),
-                // stop rotation and restore all surviving Inspector leases (no hidden background rotation).
                 if (!_disposed && !s_isInLifecycleBoundary && _openWindows.Count == 0)
                 {
                     Coordinator.HandleLifecycleBoundaryStop(StopReason.LastManagerWindowClosed, suspendMode: false);

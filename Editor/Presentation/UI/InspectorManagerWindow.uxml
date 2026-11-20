@@ -1,0 +1,93 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements">
+    <!-- 標準ヘッダー (トップバー) -->
+    <ui:VisualElement name="appbar" class="dennoko-appbar">
+        <ui:VisualElement class="dennoko-appbar__title">
+            <ui:Label name="appbar-title" text="Inspector Manager V2" class="dennoko-title" />
+        </ui:VisualElement>
+        <ui:VisualElement class="dennoko-appbar__actions">
+            <ui:Button name="appbar-lang" text="EN" class="dennoko-appbar-lang" />
+            <ui:Button name="appbar-settings" class="dennoko-icon-button" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+
+    <!-- 障害・復元未完了バナー (Faulted / 復元未完了時のみ表示、固定) -->
+    <ui:VisualElement name="fault-banner" class="dennoko-inline-warning imv2-banner-fixed">
+        <ui:Label name="fault-banner-text" text="" class="dennoko-inline-warning__text" />
+        <ui:Button name="retry-restore-button" text="復元を再試行" class="dennoko-inline-warning__action" />
+    </ui:VisualElement>
+
+    <!-- 能力不足・保存停止警告バナー (必要時のみ表示、固定) -->
+    <ui:HelpBox name="warning-helpbox" text="" message-type="Warning" class="dennoko-helpbox--warning imv2-helpbox-fixed" />
+
+    <!-- 稼働中セッションバナー (B7: 稼働中のみ固定表示) -->
+    <ui:VisualElement name="running-banner" class="dennoko-session-banner">
+        <ui:VisualElement class="dennoko-session-dot" />
+        <ui:Label name="running-banner-state" text="稼働中" class="dennoko-session-banner__state" />
+        <ui:Label name="running-banner-detail" text="履歴モード (MRU)" class="dennoko-session-banner__target" />
+    </ui:VisualElement>
+
+    <!-- メインスクロール領域 -->
+    <ui:ScrollView name="main-scroll" class="dennoko-scroll">
+
+        <!-- 管理対象 Inspector 一覧カード -->
+        <ui:VisualElement name="managed-card" class="dennoko-card imv2-section-card">
+            <ui:VisualElement class="dennoko-card-header dennoko-card-header--row">
+                <ui:Label name="managed-card-title" text="管理対象 Inspector (0)" class="dennoko-section-title dennoko-card-header__title" />
+                <ui:Button name="refresh-button" class="dennoko-icon-button" />
+                <ui:Button name="reset-layout-button" class="dennoko-icon-button" />
+            </ui:VisualElement>
+
+            <ui:VisualElement name="managed-list" class="imv2-inspector-list" />
+
+            <ui:VisualElement name="managed-empty" class="dennoko-empty-state">
+                <ui:Label name="managed-empty-message" text="管理対象の Inspector がありません" class="dennoko-empty-state__message" />
+                <ui:Button name="managed-empty-add" text="+ Inspector追加" class="dennoko-button-secondary" />
+            </ui:VisualElement>
+
+            <ui:Label name="history-mru-hint" text="※「-1」「-2」は異なる選択の最近使用順 (MRU) を表します。" class="dennoko-hint imv2-card-hint" />
+        </ui:VisualElement>
+
+        <!-- 外部 Inspector カード (外部Inspectorがあるときのみ表示) -->
+        <ui:VisualElement name="external-card" class="dennoko-card imv2-section-card">
+            <ui:VisualElement class="dennoko-card-header dennoko-card-header--row">
+                <ui:Label name="external-card-title" text="外部 Inspector (0)" class="dennoko-section-title dennoko-card-header__title" />
+            </ui:VisualElement>
+            <ui:VisualElement name="external-list" class="imv2-inspector-list" />
+            <ui:Label name="external-hint" text="外部で開かれた Inspector は自動ロックしません。「管理に追加」で対象へ含めます。" class="dennoko-hint imv2-card-hint" />
+        </ui:VisualElement>
+
+        <!-- 詳細設定カード (B2 + .dennoko-details 既定折りたたみ＋要約チップ) -->
+        <ui:VisualElement name="settings-card" class="dennoko-card dennoko-options-card imv2-section-card">
+            <ui:VisualElement name="advanced-details" class="dennoko-details dennoko-details--collapsed">
+                <ui:VisualElement class="dennoko-details__header">
+                    <ui:Label text="▶" class="dennoko-details__arrow" />
+                    <ui:Label name="advanced-details-title" text="詳細設定" class="dennoko-details__title" />
+                    <ui:VisualElement name="advanced-details-chips" class="dennoko-details__chips" />
+                </ui:VisualElement>
+                <ui:VisualElement class="dennoko-details__content">
+                    <ui:SliderInt name="max-history-slider" label="履歴保持数" low-value="4" high-value="200" value="20" show-input-field="true" />
+                    <ui:Toggle name="record-scene-toggle" text="シーン内オブジェクトを記録" value="true" />
+                    <ui:Toggle name="record-assets-toggle" text="アセットを記録" value="true" />
+                    <ui:Toggle name="show-overlays-toggle" text="各 Inspector にオーバーレイを表示" value="true" />
+
+                    <ui:VisualElement class="dennoko-separator imv2-sub-separator" />
+
+                    <ui:Label name="blocked-categories-title" text="カテゴリ別更新ブロック" class="dennoko-section-title imv2-sub-title" />
+                    <ui:Label name="blocked-categories-hint" text="選択中の有効対象すべてがブロック対象の場合のみ更新を抑止します（例：フォルダ+GameObjectの混合選択は全体を表示）。" class="dennoko-hint" />
+                    <ui:VisualElement name="blocked-categories-grid" class="imv2-category-grid" />
+                </ui:VisualElement>
+            </ui:VisualElement>
+        </ui:VisualElement>
+
+    </ui:ScrollView>
+
+    <!-- 標準フッター (カードで囲まない) -->
+    <ui:VisualElement class="dennoko-footer">
+        <ui:Label name="footer-info" text="" class="dennoko-footer__info" />
+        <ui:Button name="add-inspector-button" text="+ Inspector追加" class="dennoko-button-secondary" />
+        <ui:Button name="primary-toggle-button" text="開始" class="dennoko-button-primary" />
+    </ui:VisualElement>
+
+    <!-- 標準ステータスバー -->
+    <ui:Label name="status-label" text="停止中 (Off)" class="dennoko-status" />
+</ui:UXML>

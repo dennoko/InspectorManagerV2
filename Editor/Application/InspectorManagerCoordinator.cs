@@ -26,30 +26,24 @@ namespace DennokoWorks.InspectorManagerV2.Application
     public sealed class UiSnapshot
     {
         public ManagerState State { get; }
-        public PerformanceMetrics Metrics { get; }
-        public IReadOnlyList<DiagnosticLogEntry> RecentLogs { get; }
         public bool HasPendingVerification { get; }
         public long CapturedAtMs { get; }
 
         public UiSnapshot(
             ManagerState state,
-            PerformanceMetrics metrics,
-            IReadOnlyList<DiagnosticLogEntry> recentLogs,
             bool hasPendingVerification,
             long capturedAtMs)
         {
             State = state;
-            Metrics = metrics;
-            RecentLogs = recentLogs;
             HasPendingVerification = hasPendingVerification;
             CapturedAtMs = capturedAtMs;
         }
     }
 
     /// <summary>
-    /// Single-queue main-thread runtime controller (Section 3, 5, 6, 8, 9, 11, 14).
-    /// All UI events, shortcuts, and Unity callbacks enqueue commands here and are executed
-    /// deterministically outside IMGUI callbacks with bounded queue depth and per-tick budgets.
+    /// Single-queue main-thread runtime controller for History-mode Inspector management.
+    /// All UI events and Unity callbacks enqueue commands here and execute deterministically
+    /// with bounded queue depth, per-tick budgets, lease restoration, and standard padlock detection.
     /// </summary>
     public sealed class InspectorManagerCoordinator : IDisposable
     {
@@ -58,11 +52,9 @@ namespace DennokoWorks.InspectorManagerV2.Application
         public const long DefaultReconcileIntervalMs = 350;
         public const long DefaultPersistDebounceMs = 800;
         public const long DefaultReloadGraceMs = 1500;
-        public const long DefaultNavigationExpectationTimeoutMs = 400;
 
         private readonly IInspectorAdapter _inspectorAdapter;
         private readonly ISelectionAdapter _selectionAdapter;
-        private readonly IFavoriteResolver _favoriteResolver;
         private readonly IPersistenceStore _persistenceStore;
         private readonly ISessionLayoutStore _sessionLayoutStore;
         private readonly IMonotonicClock _clock;
@@ -77,7 +69,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
         private readonly long _reconcileIntervalMs;
         private readonly long _persistDebounceMs;
         private readonly long _reloadGraceMs;
-        private readonly long _navigationTimeoutMs;
 
         private ManagerState _state;
         private string _editorSessionId;
@@ -91,14 +82,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
         private bool _isInputBlocked;
         private bool _disposed;
 
-        // Metrics
-        private double _lastSelectionToCommitMs;
-        private double _lastPlanExecutionMs;
-        private int _peakQueueDepth;
-        private long _totalCommittedPlans;
-        private long _totalWriteSkips;
-        private long _lastSelectionReceivedAtMs;
-
         public event Action StateChanged;
 
         public ManagerState CurrentState => _state;
@@ -107,7 +90,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
             string projectId,
             IInspectorAdapter inspectorAdapter,
             ISelectionAdapter selectionAdapter,
-            IFavoriteResolver favoriteResolver,
             IPersistenceStore persistenceStore,
             ISessionLayoutStore sessionLayoutStore,
             IMonotonicClock clock,
@@ -118,13 +100,11 @@ namespace DennokoWorks.InspectorManagerV2.Application
             long reconcileIntervalMs = DefaultReconcileIntervalMs,
             long persistDebounceMs = DefaultPersistDebounceMs,
             long reloadGraceMs = DefaultReloadGraceMs,
-            long navigationTimeoutMs = DefaultNavigationExpectationTimeoutMs,
             long pendingVerifyTimeoutMs = 500)
         {
             _projectId = projectId ?? string.Empty;
             _inspectorAdapter = inspectorAdapter ?? throw new ArgumentNullException(nameof(inspectorAdapter));
             _selectionAdapter = selectionAdapter ?? throw new ArgumentNullException(nameof(selectionAdapter));
-            _favoriteResolver = favoriteResolver ?? throw new ArgumentNullException(nameof(favoriteResolver));
             _persistenceStore = persistenceStore ?? throw new ArgumentNullException(nameof(persistenceStore));
             _sessionLayoutStore = sessionLayoutStore ?? throw new ArgumentNullException(nameof(sessionLayoutStore));
             _clock = clock ?? throw new ArgumentNullException(nameof(clock));
@@ -136,7 +116,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
             _reconcileIntervalMs = reconcileIntervalMs >= 0 ? reconcileIntervalMs : DefaultReconcileIntervalMs;
             _persistDebounceMs = persistDebounceMs >= 0 ? persistDebounceMs : DefaultPersistDebounceMs;
             _reloadGraceMs = reloadGraceMs >= 0 ? reloadGraceMs : DefaultReloadGraceMs;
-            _navigationTimeoutMs = navigationTimeoutMs > 0 ? navigationTimeoutMs : DefaultNavigationExpectationTimeoutMs;
 
             _planExecutor = new PlanExecutor(
                 _inspectorAdapter,
@@ -156,22 +135,17 @@ namespace DennokoWorks.InspectorManagerV2.Application
             _isInputBlocked = false;
             _editorSessionId = _sessionLayoutStore.GetEditorSessionId() ?? _editorSessionId;
 
-            // 1. Load Settings & Favorites from project-scoped store (with schema / corruption protection).
-            var loadSettings = _persistenceStore.LoadSettingsAndFavorites();
+            var loadSettings = _persistenceStore.LoadSettings();
             var settings = loadSettings.Value != null ? loadSettings.Value.ToDomainSettings() : ManagerSettings.CreateDefault();
-            var favorites = loadSettings.Value != null ? loadSettings.Value.ToDomainFavorites() : Array.Empty<FavoriteEntry>();
 
             _state = ManagerState.CreateInitial(settings, AdapterCapabilities.None())
                 .With(
-                    favorites: favorites,
                     persistenceWriteBlocked: loadSettings.NewerSchemaDetected || _persistenceStore.IsWriteBlockedByNewerSchema,
                     statusNotice: loadSettings.Notice);
 
-            // 2. Read-only capability probe (Section 8.1: never mutates existing Inspectors on startup).
             var caps = _inspectorAdapter.ProbeCapabilities();
             ApplyReduce(new CapabilitiesProbedEvent(opId, _state.Generation, caps));
 
-            // 3. Restore within-session layout (fixed numbers, role orders, exclusions) if same Editor session (Section 9).
             var sessionLayout = _sessionLayoutStore.LoadSessionLayout();
             if (sessionLayout != null && string.Equals(sessionLayout.EditorSessionId, _editorSessionId, StringComparison.Ordinal))
             {
@@ -179,16 +153,9 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 RestoreSessionLayoutIntoState(sessionLayout);
             }
 
-            // 4. Synchronize live Inspector windows.
             SynchronizeWindows(opId);
-
-            // 5. Check RecoveryJournal for any unrestored leases from a reload/crash (Section 9 & 10).
             RecoverPendingJournalOnStartup(opId);
 
-            // 6. Refresh favorite resolution statuses (read-only, never auto-opens scenes!).
-            RefreshFavoriteResolutionsInternal(opId);
-
-            // 7. Capture current live selection as initial observation (NOT mutating anything).
             var currentSel = _selectionAdapter.CaptureCurrentSelection(_nextSelectionSeq++, _state.Generation, SelectionSource.RecoveryObservation);
             if (!currentSel.IsEmpty)
             {
@@ -204,59 +171,30 @@ namespace DennokoWorks.InspectorManagerV2.Application
 
         public UiSnapshot GetUiSnapshot()
         {
-            var metrics = new PerformanceMetrics(
-                _lastSelectionToCommitMs,
-                _lastPlanExecutionMs,
-                _queue.Count,
-                _peakQueueDepth,
-                _totalCommittedPlans,
-                _totalWriteSkips,
-                GC.GetTotalMemory(false));
-
             return new UiSnapshot(
                 _state,
-                metrics,
-                _logger.GetRecentEntries(),
                 _planExecutor.HasPendingVerification,
                 _clock.NowMs);
         }
 
-        // --- Public Command Enqueue Entry Points (safe to call from IMGUI, shortcuts, or Unity callbacks) ---
+        // --- Public Command Enqueue Entry Points ---
 
         public void EnqueueStartRotation() => Enqueue("StartRotation", null);
         public void EnqueueStopRotation(StopReason reason = StopReason.UserRequested) => Enqueue("StopRotation", reason);
-        public void EnqueuePauseRotation() => Enqueue("PauseRotation", null);
-        public void EnqueueResumeRotation() => Enqueue("ResumeRotation", null);
         public void EnqueueRetryRestore() => Enqueue("RetryRestore", null);
         public void EnqueueAddInspector() => Enqueue("AddInspector", null);
         public void EnqueueAdoptInspector(WindowKey key) => Enqueue("AdoptInspector", key);
         public void EnqueueCloseInspector(WindowKey key) => Enqueue("CloseInspector", key);
         public void EnqueueToggleLock(WindowKey key) => Enqueue("ToggleLock", key);
-        public void EnqueueToggleFocusedInspectorLock() => Enqueue("ToggleFocusedInspectorLock", null);
-        public void EnqueueBulkLock(bool locked) => Enqueue("BulkLock", locked);
         public void EnqueueSetExcluded(WindowKey key, bool excluded) => Enqueue("SetExcluded", (key, excluded));
         public void EnqueueReorderWindow(WindowKey key, int newRoleIndex) => Enqueue("ReorderWindow", (key, newRoleIndex));
         public void EnqueueFocusInspector(WindowKey key) => Enqueue("FocusInspector", key);
-        public void EnqueueNavigateBack() => Enqueue("NavigateBack", null);
-        public void EnqueueNavigateForward() => Enqueue("NavigateForward", null);
-        public void EnqueueNavigateToIndex(int index) => Enqueue("NavigateToIndex", index);
-        public void EnqueueClearNavigationHistory() => Enqueue("ClearNavigationHistory", null);
         public void EnqueueUpdateSettings(ManagerSettings newSettings, bool isExplicitLayoutChange = false) => Enqueue("UpdateSettings", (newSettings, isExplicitLayoutChange));
         public void EnqueueResetSettings() => Enqueue("ResetSettings", null);
         public void EnqueueResetLayout() => Enqueue("ResetLayout", null);
-        public void EnqueueAddFavoriteFromCurrentSelection() => Enqueue("AddFavoriteFromCurrentSelection", null);
-        public void EnqueueAddFavoriteObject(ObjectRefKey key) => Enqueue("AddFavoriteObject", key);
-        public void EnqueueRemoveFavorite(string favoriteId) => Enqueue("RemoveFavorite", favoriteId);
-        public void EnqueueReorderFavorite(string favoriteId, int newIndex) => Enqueue("ReorderFavorite", (favoriteId, newIndex));
-        public void EnqueueSelectFavorite(string favoriteId) => Enqueue("SelectFavorite", favoriteId);
-        public void EnqueuePingFavorite(string favoriteId) => Enqueue("PingFavorite", favoriteId);
-        public void EnqueueInvalidateEnvironmentCaches(bool sceneSaved = false) => Enqueue("InvalidateEnvironmentCaches", sceneSaved);
+        public void EnqueueInvalidateEnvironmentCaches() => Enqueue("InvalidateEnvironmentCaches", null);
         public void EnqueueSynchronizeWindows() => Enqueue("SyncWindows", null);
 
-        /// <summary>
-        /// Called immediately when Unity fires Selection.selectionChanged (Section 5.1 #1).
-        /// Captures an immutable SelectionSnapshot at receipt time instead of re-reading Selection later.
-        /// </summary>
         public void OnSelectionChangedImmediate()
         {
             if (_isInputBlocked || _disposed) return;
@@ -266,24 +204,15 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 _state.Generation,
                 SelectionSource.UserSelection);
 
-            _lastSelectionReceivedAtMs = _clock.NowMs;
             Enqueue("SelectionSnapshot", snapshot);
         }
 
-        /// <summary>
-        /// Allows tests or callers to push an already-captured snapshot into the single queue.
-        /// </summary>
         public void EnqueueSelectionSnapshot(SelectionSnapshot snapshot)
         {
             if (_isInputBlocked || _disposed) return;
-            _lastSelectionReceivedAtMs = _clock.NowMs;
             Enqueue("SelectionSnapshot", snapshot);
         }
 
-        /// <summary>
-        /// Synchronous lifecycle boundary handler for AssemblyReload, PlayMode, LastManagerWindowClosed, or EditorQuitting (Section 9).
-        /// Immediately stops input, increments generation, flushes settings, and restores all surviving leases.
-        /// </summary>
         public void HandleLifecycleBoundaryStop(StopReason reason, bool suspendMode)
         {
             string opId = NextOperationId();
@@ -294,10 +223,10 @@ namespace DennokoWorks.InspectorManagerV2.Application
             _inspectorAdapter.InvalidateCache();
 
             PersistSessionLayoutNow();
-            _persistenceStore.FlushSettingsAndFavorites();
+            _persistenceStore.FlushSettings();
             _persistDirtyAtMs = -1;
 
-            if (_state.Leases.Count > 0 || _state.LifecycleState == RuntimeLifecycleState.Running || _state.LifecycleState == RuntimeLifecycleState.Paused)
+            if (_state.Leases.Count > 0 || _state.LifecycleState == RuntimeLifecycleState.Running)
             {
                 ApplyReduce(new StopSessionRequestedEvent(opId, _state.Generation, reason, suspendMode));
                 var (updatedLeases, allRestored, error) = _planExecutor.RestoreLeases(
@@ -330,23 +259,18 @@ namespace DennokoWorks.InspectorManagerV2.Application
         {
             _isInputBlocked = false;
             _inspectorAdapter.InvalidateCache();
-            _favoriteResolver.InvalidateCache();
             _planExecutor.InvalidateAllCaches();
 
-            // Section 9: Never auto-restart rotation after Play Mode return; move Suspended -> Off.
             if (_state.LifecycleState == RuntimeLifecycleState.Suspended)
             {
                 _state = _state.With(lifecycleState: RuntimeLifecycleState.Off, statusNotice: "Off (returned from Play Mode).");
             }
 
             EnqueueSynchronizeWindows();
-            EnqueueInvalidateEnvironmentCaches(sceneSaved: false);
+            EnqueueInvalidateEnvironmentCaches();
             NotifyStateChanged();
         }
 
-        /// <summary>
-        /// Main-thread budgeted execution tick called from EditorApplication.update (NEVER from OnGUI).
-        /// </summary>
         public void Tick()
         {
             if (_disposed) return;
@@ -355,7 +279,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
             bool stateDirty = false;
             var flashedWindows = new HashSet<WindowKey>();
 
-            // 1. Poll deferred PresentationPending verification first (Invariant 1: blocks new write plans while pending).
+            // 1. Poll deferred PresentationPending verification first.
             if (_planExecutor.HasPendingVerification)
             {
                 var pendingOutcome = _planExecutor.PollPendingVerification(_state, _editorSessionId, _managementSessionId);
@@ -366,16 +290,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 }
             }
 
-            // 2. Check expired ExpectedNavigationNotification (Section 5.2: finalize via readback, never wait forever).
-            if (_state.PendingNavigation != null && now > _state.PendingNavigation.ExpiresAtMs)
-            {
-                string opId = NextOperationId();
-                var observed = _selectionAdapter.CaptureCurrentSelection(_nextSelectionSeq++, _state.Generation, SelectionSource.HistoryNavigation);
-                ApplyReduceAndRunEffects(new NavigationNotificationExpiredEvent(opId, _state.Generation, observed), flashedWindows);
-                stateDirty = true;
-            }
-
-            // 3. Process queued commands within per-tick budget (pausing write-triggering commands while verification is pending).
+            // 2. Process queued commands within per-tick budget.
             int processed = 0;
             while (processed < _commandsPerTickBudget && _queue.Count > 0)
             {
@@ -396,7 +311,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 }
             }
 
-            // 4. Low-frequency reconciliation (window changes, unknown lock drop detection, reload grace expiry).
+            // 3. Low-frequency reconciliation (window changes, padlock unlock/relock, unknown lock drop recovery).
             if (!_isInputBlocked && !_planExecutor.HasPendingVerification && (now - _lastReconcileMs >= _reconcileIntervalMs))
             {
                 _lastReconcileMs = now;
@@ -406,11 +321,11 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 }
             }
 
-            // 5. Debounced settings & favorites persistence flush.
+            // 4. Debounced settings persistence flush.
             if (_persistDirtyAtMs >= 0 && (now - _persistDirtyAtMs >= _persistDebounceMs))
             {
                 _persistDirtyAtMs = -1;
-                var saveRes = _persistenceStore.FlushSettingsAndFavorites();
+                var saveRes = _persistenceStore.FlushSettings();
                 if (!saveRes.Succeeded)
                 {
                     ApplyReduce(new StatusNoticeEvent(
@@ -434,7 +349,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
         {
             if (_disposed) return;
             _disposed = true;
-            _persistenceStore.FlushSettingsAndFavorites();
+            _persistenceStore.FlushSettings();
             _overlayPresenter?.ClearAllOverlays();
             _overlayPresenter?.Dispose();
             _persistenceStore.Dispose();
@@ -445,13 +360,12 @@ namespace DennokoWorks.InspectorManagerV2.Application
             if (_disposed) return;
             if (_isInputBlocked && kind != "StopRotation") return;
 
-            // Section 5.1: Bounded queue policy. On overflow, stop auto-rotation safely and notify user.
             if (_queue.Count >= _maxQueueSize)
             {
                 string opId = NextOperationId();
                 _logger.Error(opId, _state.Generation, null, "QueueOverflow", "Command queue limit reached (" + _maxQueueSize + "); stopping auto-rotation.");
                 _queue.Clear();
-                if (_state.LifecycleState == RuntimeLifecycleState.Running || _state.LifecycleState == RuntimeLifecycleState.Paused)
+                if (_state.LifecycleState == RuntimeLifecycleState.Running)
                 {
                     HandleLifecycleBoundaryStop(StopReason.QueueOverflow, suspendMode: false);
                     _isInputBlocked = false;
@@ -466,10 +380,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
             }
 
             _queue.Enqueue(new RuntimeCommand(kind, NextOperationId(), _clock.NowMs, _state.Generation, payload));
-            if (_queue.Count > _peakQueueDepth)
-            {
-                _peakQueueDepth = _queue.Count;
-            }
         }
 
         private bool ExecuteCommand(RuntimeCommand cmd, HashSet<WindowKey> flashedWindows)
@@ -484,15 +394,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
                     ExecuteStopRotation(cmd.OperationId, cmd.Payload is StopReason r ? r : StopReason.UserRequested);
                     return true;
 
-                case "PauseRotation":
-                    _planExecutor.CancelPendingVerification();
-                    ApplyReduce(new PauseRequestedEvent(cmd.OperationId, _state.Generation));
-                    return true;
-
-                case "ResumeRotation":
-                    ApplyReduceAndRunEffects(new ResumeRequestedEvent(cmd.OperationId, _state.Generation), flashedWindows);
-                    return true;
-
                 case "RetryRestore":
                     ExecuteRetryRestore(cmd.OperationId);
                     return true;
@@ -500,7 +401,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 case "SelectionSnapshot":
                     if (cmd.Payload is SelectionSnapshot snap)
                     {
-                        ApplyReduceAndRunEffects(new SelectionReceivedEvent(cmd.OperationId, _state.Generation, snap, _clock.NowMs), flashedWindows);
+                        ApplyReduceAndRunEffects(new SelectionReceivedEvent(cmd.OperationId, _state.Generation, snap), flashedWindows);
                         return true;
                     }
                     return false;
@@ -533,25 +434,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
                     }
                     return false;
 
-                case "ToggleFocusedInspectorLock":
-                {
-                    var focusedKey = _inspectorAdapter.GetFocusedInspectorKey();
-                    if (focusedKey.HasValue)
-                    {
-                        ExecuteToggleLock(cmd.OperationId, focusedKey.Value, flashedWindows);
-                        return true;
-                    }
-                    return false;
-                }
-
-                case "BulkLock":
-                    if (cmd.Payload is bool bulkLocked)
-                    {
-                        ExecuteBulkLock(cmd.OperationId, bulkLocked, flashedWindows);
-                        return true;
-                    }
-                    return false;
-
                 case "SetExcluded":
                     if (cmd.Payload is ValueTuple<WindowKey, bool> exTuple)
                     {
@@ -576,34 +458,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
                     }
                     return false;
 
-                case "NavigateBack":
-                    if (_state.NavigationHistory.CanGoBack)
-                    {
-                        ExecuteNavigationMove(cmd.OperationId, _state.NavigationHistory.CursorIndex - 1, flashedWindows);
-                        return true;
-                    }
-                    return false;
-
-                case "NavigateForward":
-                    if (_state.NavigationHistory.CanGoForward)
-                    {
-                        ExecuteNavigationMove(cmd.OperationId, _state.NavigationHistory.CursorIndex + 1, flashedWindows);
-                        return true;
-                    }
-                    return false;
-
-                case "NavigateToIndex":
-                    if (cmd.Payload is int idx)
-                    {
-                        ExecuteNavigationMove(cmd.OperationId, idx, flashedWindows);
-                        return true;
-                    }
-                    return false;
-
-                case "ClearNavigationHistory":
-                    ApplyReduce(new ClearNavigationHistoryEvent(cmd.OperationId, _state.Generation));
-                    return true;
-
                 case "UpdateSettings":
                     if (cmd.Payload is ValueTuple<ManagerSettings, bool> sTuple)
                     {
@@ -623,57 +477,9 @@ namespace DennokoWorks.InspectorManagerV2.Application
                     ApplyReduceAndRunEffects(new ResetLayoutEvent(cmd.OperationId, _state.Generation), flashedWindows);
                     return true;
 
-                case "AddFavoriteFromCurrentSelection":
-                    ExecuteAddFavoriteFromCurrentSelection(cmd.OperationId);
-                    return true;
-
-                case "AddFavoriteObject":
-                    if (cmd.Payload is ObjectRefKey favKey)
-                    {
-                        ExecuteAddFavoriteObject(cmd.OperationId, favKey);
-                        return true;
-                    }
-                    return false;
-
-                case "RemoveFavorite":
-                    if (cmd.Payload is string favId)
-                    {
-                        var remaining = _state.Favorites.Where(f => !string.Equals(f.FavoriteId, favId, StringComparison.Ordinal))
-                            .Select((f, i) => f.With(sortOrder: i)).ToArray();
-                        ApplyReduceAndRunEffects(new FavoritesUpdatedEvent(cmd.OperationId, _state.Generation, remaining), flashedWindows);
-                        return true;
-                    }
-                    return false;
-
-                case "ReorderFavorite":
-                    if (cmd.Payload is ValueTuple<string, int> favMove)
-                    {
-                        ExecuteReorderFavorite(cmd.OperationId, favMove.Item1, favMove.Item2, flashedWindows);
-                        return true;
-                    }
-                    return false;
-
-                case "SelectFavorite":
-                    if (cmd.Payload is string selectFavId)
-                    {
-                        ExecuteSelectFavorite(cmd.OperationId, selectFavId);
-                        return true;
-                    }
-                    return false;
-
-                case "PingFavorite":
-                    if (cmd.Payload is string pingFavId)
-                    {
-                        ExecutePingFavorite(cmd.OperationId, pingFavId);
-                        return true;
-                    }
-                    return false;
-
                 case "InvalidateEnvironmentCaches":
                     _inspectorAdapter.InvalidateCache();
-                    _favoriteResolver.InvalidateCache();
                     _planExecutor.InvalidateAllCaches();
-                    RefreshFavoriteResolutionsInternal(cmd.OperationId);
                     return true;
 
                 case "SyncWindows":
@@ -706,7 +512,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
             var leases = new Dictionary<WindowKey, LockLease>();
             var observedDisplays = new List<SelectionSnapshot>();
 
-            // Step 1: Read pre-session original lock & actual display for ALL managed windows BEFORE writing anything.
             var reads = new Dictionary<WindowKey, InspectorReadResult>();
             foreach (var w in managedWindows)
             {
@@ -741,8 +546,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
                     lastError: string.Empty);
             }
 
-            // Step 2 (Section 10): Persist RecoveryJournal BEFORE acquiring/writing any lock!
-            // If journal persistence fails, refuse to start or mutate any Inspector lock.
             if (leases.Count > 0)
             {
                 var journalSave = SaveRecoveryJournal(leases);
@@ -760,7 +563,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 }
             }
 
-            // Step 3: Lock all participating & explicitly excluded managed windows (skipping manually unlocked ones).
             var acquiredSoFar = new Dictionary<WindowKey, LockLease>();
             foreach (var w in managedWindows)
             {
@@ -771,7 +573,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
                     var writeRes = _inspectorAdapter.WriteLockOnly(w.Key, true);
                     if (!writeRes.IsSuccess || !writeRes.ObservedLocked)
                     {
-                        // Section 6.3: Partial start failure -> restore already-acquired leases!
                         var (restored, allRestored, restoreErr) = _planExecutor.RestoreLeases(
                             acquiredSoFar,
                             _state.Generation,
@@ -803,11 +604,9 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 SaveRecoveryJournal(leases);
             }
 
-            // Step 4: Seed RotationHistory per Section 5.3 priority (CurrentSelection -> NavigationHistory -> ObservedDisplays).
             int capacity = Math.Max(_state.Settings.MaxRotationHistory, managedWindows.Count);
             var seededHistory = RotationHistoryState.BuildSeeded(
                 _state.CurrentLiveSelection,
-                _state.NavigationHistory.Entries,
                 observedDisplays,
                 IsSelectionEligibleForRotation,
                 capacity);
@@ -872,7 +671,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 return;
             }
 
-            bool isSessionActive = _state.LifecycleState == RuntimeLifecycleState.Running || _state.LifecycleState == RuntimeLifecycleState.Paused;
+            bool isSessionActive = _state.LifecycleState == RuntimeLifecycleState.Running;
             LockLease lease = null;
             bool finalLocked = created.ObservedLocked;
 
@@ -892,7 +691,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 var journalSave = SaveRecoveryJournal(tempLeases);
                 if (!journalSave.Succeeded)
                 {
-                    // Section 6.2: Only clean up created window if confirmed empty & exact same instance.
                     if (created.ConfirmedEmptyNewWindow)
                     {
                         _inspectorAdapter.CloseInspectorWindow(created.WindowKey, created.IdentityEvidence);
@@ -933,7 +731,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 return;
             }
 
-            bool isSessionActive = _state.LifecycleState == RuntimeLifecycleState.Running || _state.LifecycleState == RuntimeLifecycleState.Paused;
+            bool isSessionActive = _state.LifecycleState == RuntimeLifecycleState.Running;
             LockLease lease = null;
             bool finalLocked = read.ObservedLocked;
 
@@ -996,7 +794,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 return;
             }
 
-            // Section 6.2: Restore lease original lock BEFORE closing; if restore fails, DO NOT close automatically!
             LockLease finalLease = null;
             if (_state.Leases.TryGetValue(key, out var lease) && lease.RestorationStatus == LeaseRestorationStatus.Acquired)
             {
@@ -1057,38 +854,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
             ApplyReduceAndRunEffects(new ManualLockChangedEvent(opId, _state.Generation, key, desiredLock, updatedLease), flashedWindows);
         }
 
-        private void ExecuteBulkLock(string opId, bool desiredLock, HashSet<WindowKey> flashedWindows)
-        {
-            var targets = _state.GetManagedAliveWindowsOrdered();
-            var affected = new List<WindowKey>();
-            var errors = new List<string>();
-
-            for (int i = 0; i < targets.Count; i++)
-            {
-                var w = targets[i];
-                var writeRes = _inspectorAdapter.WriteLockOnly(w.Key, desiredLock);
-                if (writeRes.IsSuccess && writeRes.ObservedLocked == desiredLock)
-                {
-                    _planExecutor.InvalidateWindowCache(w.Key);
-                    affected.Add(w.Key);
-                }
-                else
-                {
-                    errors.Add("#" + w.FixedDisplayNumber + ": " + writeRes.Error);
-                }
-            }
-
-            if (affected.Count > 0)
-            {
-                ApplyReduceAndRunEffects(new BulkManualLockChangedEvent(opId, _state.Generation, desiredLock, affected), flashedWindows);
-            }
-
-            if (errors.Count > 0)
-            {
-                ApplyReduce(new StatusNoticeEvent(opId, _state.Generation, "Some Inspectors failed during bulk lock operation.", string.Join(" | ", errors)));
-            }
-        }
-
         private void ExecuteSetExcluded(string opId, WindowKey key, bool excluded, HashSet<WindowKey> flashedWindows)
         {
             var win = _state.FindWindow(key);
@@ -1101,13 +866,11 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 return;
             }
 
-            bool isSessionActive = _state.LifecycleState == RuntimeLifecycleState.Running || _state.LifecycleState == RuntimeLifecycleState.Paused;
+            bool isSessionActive = _state.LifecycleState == RuntimeLifecycleState.Running;
             LockLease lease = null;
             bool finalLocked = read.ObservedLocked;
 
-            // Section 6.1: Explicit exclusion locks the Inspector to freeze its display under a lease.
-            // While Off there is no lease to restore from, so only the flag is recorded; Start locks excluded windows
-            // under a lease (Step 3). Writing a lock here would leak into the next session's OriginalLocked.
+            // While Off there is no lease to restore from, so only the flag is recorded; Start locks excluded windows under a lease.
             if (excluded && isSessionActive)
             {
                 if (!_state.Leases.ContainsKey(key))
@@ -1148,123 +911,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
             ApplyReduceAndRunEffects(new ExplicitExclusionChangedEvent(opId, _state.Generation, key, excluded, finalLocked, lease), flashedWindows);
         }
 
-        private void ExecuteNavigationMove(string opId, int targetIndex, HashSet<WindowKey> flashedWindows)
-        {
-            if (targetIndex < 0 || targetIndex >= _state.NavigationHistory.Entries.Count)
-            {
-                return;
-            }
-
-            var target = _state.NavigationHistory.Entries[targetIndex];
-            // Section 7: If ANY object in a multi-selection history entry disappeared, do NOT shrink to partial subset!
-            if (!_selectionAdapter.AreAllTargetsAlive(target.GetOrderedKeys()))
-            {
-                ApplyReduce(new StatusNoticeEvent(opId, _state.Generation, "History entry unavailable: one or more objects no longer exist."));
-                return;
-            }
-
-            ApplyReduceAndRunEffects(
-                new NavigationMoveRequestedEvent(opId, _state.Generation, targetIndex, _clock.NowMs + _navigationTimeoutMs),
-                flashedWindows);
-        }
-
-        private void ExecuteAddFavoriteFromCurrentSelection(string opId)
-        {
-            if (_state.CurrentLiveSelection == null || _state.CurrentLiveSelection.IsEmpty)
-            {
-                ApplyReduce(new StatusNoticeEvent(opId, _state.Generation, "No active object selected to add to favorites."));
-                return;
-            }
-
-            var targetKey = _state.CurrentLiveSelection.ActiveTarget ?? _state.CurrentLiveSelection.OrderedTargets[0].Key;
-            ExecuteAddFavoriteObject(opId, targetKey);
-        }
-
-        private void ExecuteAddFavoriteObject(string opId, ObjectRefKey key)
-        {
-            if (!key.IsValid || !_selectionAdapter.IsTargetAlive(key))
-            {
-                ApplyReduce(new StatusNoticeEvent(opId, _state.Generation, "Cannot add favorite: target object is unavailable."));
-                return;
-            }
-
-            var created = _favoriteResolver.CreateFromLiveObject(key, _state.Favorites.Count);
-            if (created == null)
-            {
-                ApplyReduce(new StatusNoticeEvent(opId, _state.Generation, "Failed to create favorite entry."));
-                return;
-            }
-
-            // Avoid duplicate favorite for identical persistent ID or temporary runtime key.
-            bool duplicate = _state.Favorites.Any(f =>
-                (!created.PersistentId.IsEmpty && f.PersistentId == created.PersistentId)
-                || (created.IsTemporary && f.TemporaryRuntimeKey.HasValue && f.TemporaryRuntimeKey == created.TemporaryRuntimeKey));
-
-            if (duplicate)
-            {
-                ApplyReduce(new StatusNoticeEvent(opId, _state.Generation, "Object is already in favorites."));
-                return;
-            }
-
-            var nextList = _state.Favorites.Concat(new[] { created }).Select((f, i) => f.With(sortOrder: i)).ToArray();
-            ApplyReduceAndRunEffects(new FavoritesUpdatedEvent(opId, _state.Generation, nextList), new HashSet<WindowKey>());
-        }
-
-        private void ExecuteReorderFavorite(string opId, string favoriteId, int newIndex, HashSet<WindowKey> flashedWindows)
-        {
-            var list = _state.Favorites.ToList();
-            int currentIdx = list.FindIndex(f => string.Equals(f.FavoriteId, favoriteId, StringComparison.Ordinal));
-            if (currentIdx < 0) return;
-
-            int clamped = Math.Max(0, Math.Min(list.Count - 1, newIndex));
-            if (clamped == currentIdx) return;
-
-            var item = list[currentIdx];
-            list.RemoveAt(currentIdx);
-            list.Insert(clamped, item);
-            var reindexed = list.Select((f, i) => f.With(sortOrder: i)).ToArray();
-            ApplyReduceAndRunEffects(new FavoritesUpdatedEvent(opId, _state.Generation, reindexed), flashedWindows);
-        }
-
-        private void ExecuteSelectFavorite(string opId, string favoriteId)
-        {
-            var fav = _state.Favorites.FirstOrDefault(f => string.Equals(f.FavoriteId, favoriteId, StringComparison.Ordinal));
-            if (fav == null) return;
-
-            var res = _favoriteResolver.Resolve(fav);
-            UpdateSingleFavoriteResolution(fav.FavoriteId, res);
-
-            if (res.State == FavoriteResolutionState.Resolved && res.ResolvedRuntimeKey.HasValue)
-            {
-                if (!_selectionAdapter.TrySetGlobalSelection(new[] { res.ResolvedRuntimeKey.Value }, res.ResolvedRuntimeKey.Value, out string err))
-                {
-                    ApplyReduce(new StatusNoticeEvent(opId, _state.Generation, "Failed to select favorite: " + err));
-                }
-            }
-            else
-            {
-                ApplyReduce(new StatusNoticeEvent(opId, _state.Generation, "Favorite unavailable (" + res.State + "): " + res.Detail));
-            }
-        }
-
-        private void ExecutePingFavorite(string opId, string favoriteId)
-        {
-            var fav = _state.Favorites.FirstOrDefault(f => string.Equals(f.FavoriteId, favoriteId, StringComparison.Ordinal));
-            if (fav == null) return;
-
-            var res = _favoriteResolver.Resolve(fav);
-            UpdateSingleFavoriteResolution(fav.FavoriteId, res);
-
-            if (res.State == FavoriteResolutionState.Resolved && res.ResolvedRuntimeKey.HasValue)
-            {
-                _selectionAdapter.PingObject(res.ResolvedRuntimeKey.Value);
-            }
-            else
-            {
-                ApplyReduce(new StatusNoticeEvent(opId, _state.Generation, "Favorite unavailable (" + res.State + "): " + res.Detail));
-            }
-        }
-
         private void ApplyReduce(DomainEvent evt)
         {
             var result = StateReducer.Reduce(_state, evt);
@@ -1281,21 +927,11 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 switch (result.Effects[i])
                 {
                     case RequestEvaluateCurrentSelectionEffect eval:
-                        RunAssignmentPlan(eval.Snapshot, eval.IsNavigationUpdate, flashedWindows);
+                        RunAssignmentPlan(eval.Snapshot, flashedWindows);
                         break;
 
                     case RequestReassignHistoryEffect reassign:
                         RunHistoryReassignment(reassign.SeedFromObservedIfEmpty, flashedWindows);
-                        break;
-
-                    case RequestSetGlobalSelectionEffect setSel:
-                        if (!_selectionAdapter.TrySetGlobalSelection(
-                            setSel.TargetSnapshot.GetOrderedKeys(),
-                            setSel.TargetSnapshot.ActiveTarget,
-                            out string err))
-                        {
-                            _state = _state.With(clearPendingNavigation: true, statusNotice: "Navigation failed: " + err);
-                        }
                         break;
 
                     case RequestRecoverLockDropEffect recover:
@@ -1313,7 +949,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
             }
         }
 
-        private void RunAssignmentPlan(SelectionSnapshot incoming, bool isNavigationUpdate, HashSet<WindowKey> flashedWindows)
+        private void RunAssignmentPlan(SelectionSnapshot incoming, HashSet<WindowKey> flashedWindows)
         {
             if (_state.LifecycleState != RuntimeLifecycleState.Running)
             {
@@ -1328,42 +964,23 @@ namespace DennokoWorks.InspectorManagerV2.Application
 
             string planId = NextOperationId();
             long seq = _nextCommitSeq++;
-            AssignmentPlan plan;
+            var plan = AssignmentPlanner.CreateHistoryPlan(
+                planId,
+                _state.Generation,
+                seq,
+                participating,
+                _state.RotationHistory,
+                incoming,
+                IsSelectionEligibleForRotation,
+                _state.Settings.MaxRotationHistory);
 
-            if (_state.Settings.Mode == RotationMode.History)
-            {
-                plan = AssignmentPlanner.CreateHistoryPlan(
-                    planId,
-                    _state.Generation,
-                    seq,
-                    participating,
-                    _state.RotationHistory,
-                    incoming,
-                    IsSelectionEligibleForRotation,
-                    _state.Settings.MaxRotationHistory,
-                    isNavigationUpdate);
-            }
-            else
-            {
-                plan = AssignmentPlanner.CreateCyclePlan(
-                    planId,
-                    _state.Generation,
-                    seq,
-                    participating,
-                    _state.RotationHistory,
-                    incoming,
-                    isNavigationUpdate);
-            }
-
-            long startMs = _clock.NowMs;
             var outcome = _planExecutor.ExecutePlan(_state, plan, _editorSessionId, _managementSessionId);
-            _lastPlanExecutionMs = Math.Max(0, _clock.NowMs - startMs);
             HandlePlanOutcome(outcome, flashedWindows);
         }
 
         private void RunHistoryReassignment(bool seedFromObservedIfEmpty, HashSet<WindowKey> flashedWindows)
         {
-            if (_state.LifecycleState != RuntimeLifecycleState.Running || _state.Settings.Mode != RotationMode.History)
+            if (_state.LifecycleState != RuntimeLifecycleState.Running)
             {
                 return;
             }
@@ -1389,7 +1006,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
 
                 historyToUse = RotationHistoryState.BuildSeeded(
                     _state.CurrentLiveSelection,
-                    _state.NavigationHistory.Entries,
                     observedDisplays,
                     IsSelectionEligibleForRotation,
                     Math.Max(_state.Settings.MaxRotationHistory, participating.Count));
@@ -1404,12 +1020,9 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 historyToUse,
                 incomingSelection: null,
                 IsSelectionEligibleForRotation,
-                _state.Settings.MaxRotationHistory,
-                isNavigationUpdate: false);
+                _state.Settings.MaxRotationHistory);
 
-            long startMs = _clock.NowMs;
             var outcome = _planExecutor.ExecutePlan(_state, plan, _editorSessionId, _managementSessionId);
-            _lastPlanExecutionMs = Math.Max(0, _clock.NowMs - startMs);
             HandlePlanOutcome(outcome, flashedWindows);
         }
 
@@ -1417,18 +1030,10 @@ namespace DennokoWorks.InspectorManagerV2.Application
         {
             if (outcome == null) return;
 
-            _totalWriteSkips += outcome.WriteSkipCount;
-
             switch (outcome.Kind)
             {
                 case PlanExecutionOutcomeKind.Committed:
                 {
-                    _totalCommittedPlans++;
-                    if (_lastSelectionReceivedAtMs > 0)
-                    {
-                        _lastSelectionToCommitMs = Math.Max(0, _clock.NowMs - _lastSelectionReceivedAtMs);
-                    }
-
                     ApplyReduce(new PlanCommittedEvent(
                         outcome.Plan.PlanId,
                         _state.Generation,
@@ -1443,19 +1048,10 @@ namespace DennokoWorks.InspectorManagerV2.Application
                             flashedWindows.Add(t.WindowKey);
                         }
                     }
-
-                    // Section 14.3: Auto-focus respects continuous Hierarchy/Project selection and never steals input!
-                    if (_state.Settings.AutoFocusUpdatedInspector
-                        && outcome.Plan.FocusCandidateWindowKey.HasValue
-                        && !_inspectorAdapter.IsSelectionSourceContinuous())
-                    {
-                        _inspectorAdapter.FocusInspector(outcome.Plan.FocusCandidateWindowKey.Value);
-                    }
                     break;
                 }
 
                 case PlanExecutionOutcomeKind.PendingVerification:
-                    // Waiting for next tick verification; do NOT commit UI or RotationHistory yet (Invariant #4).
                     break;
 
                 case PlanExecutionOutcomeKind.AbortedNoWrite:
@@ -1489,15 +1085,14 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 _reloadGraceUntilMs = -1;
             }
 
-            // Detect lock changes made outside Manager commands BEFORE standard sync overwrites state (Section 6.1 & 14.5 #2).
-            // - Unlock of a participating window while the user is interacting with that Inspector (focused / hovered)
-            //   is treated as a manual unlock via the standard padlock UI: the window leaves rotation and is NOT re-locked.
-            // - Unlock without such evidence is treated as an unknown drop (e.g. tracker rebuild) and recovered.
-            // - Re-lock of a manually unlocked window (e.g. via the standard padlock) returns it to rotation.
+            // Detect lock changes made outside Manager commands BEFORE standard sync overwrites state.
+            // - Unlock of a participating window while user is interacting with that Inspector (focused/hovered) -> manual unlock via standard padlock.
+            // - Unlock without such evidence -> unknown lock drop (e.g. tracker rebuild) -> recover.
+            // - Re-lock of a manually unlocked window -> returns it to rotation.
             var unknownDrops = new List<WindowKey>();
             var standardUiUnlocks = new List<WindowKey>();
             var standardUiRelocks = new List<WindowKey>();
-            if (_state.LifecycleState == RuntimeLifecycleState.Running || _state.LifecycleState == RuntimeLifecycleState.Paused)
+            if (_state.LifecycleState == RuntimeLifecycleState.Running)
             {
                 var obsMap = new Dictionary<WindowKey, ObservedWindowSnapshot>();
                 for (int i = 0; i < observed.Count; i++) obsMap[observed[i].Key] = observed[i];
@@ -1537,17 +1132,26 @@ namespace DennokoWorks.InspectorManagerV2.Application
 
             for (int i = 0; i < standardUiUnlocks.Count; i++)
             {
-                ApplyStandardUiLockChange(opId, standardUiUnlocks[i], newLocked: false, flashedWindows);
+                var key = standardUiUnlocks[i];
+                _planExecutor.InvalidateWindowCache(key);
+                LockLease updatedLease = _state.Leases.TryGetValue(key, out var existingLease)
+                    ? existingLease.WithWrite(false)
+                    : null;
+                ApplyReduceAndRunEffects(new ManualLockChangedEvent(opId, _state.Generation, key, newLocked: false, updatedLease), flashedWindows);
                 changed = true;
             }
 
             for (int i = 0; i < standardUiRelocks.Count; i++)
             {
-                ApplyStandardUiLockChange(opId, standardUiRelocks[i], newLocked: true, flashedWindows);
+                var key = standardUiRelocks[i];
+                _planExecutor.InvalidateWindowCache(key);
+                LockLease updatedLease = _state.Leases.TryGetValue(key, out var existingLease)
+                    ? existingLease.WithWrite(true)
+                    : null;
+                ApplyReduceAndRunEffects(new ManualLockChangedEvent(opId, _state.Generation, key, newLocked: true, updatedLease), flashedWindows);
                 changed = true;
             }
 
-            // Recover unknown lock drops (e.g., tracker recreation) WITHOUT marking them ManuallyUnlocked!
             for (int i = 0; i < unknownDrops.Count; i++)
             {
                 ApplyReduceAndRunEffects(new UnknownLockDropDetectedEvent(opId, _state.Generation, unknownDrops[i]), flashedWindows);
@@ -1555,30 +1159,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
             }
 
             return changed;
-        }
-
-        /// <summary>
-        /// Applies a lock change the user made through the standard Inspector UI (no Manager command, no tool write).
-        /// Same state transition as a Manager toggle, but nothing is written to the Inspector and the lease is untouched.
-        /// </summary>
-        private void ApplyStandardUiLockChange(string opId, WindowKey key, bool newLocked, HashSet<WindowKey> flashedWindows)
-        {
-            var win = _state.FindWindow(key);
-            if (win == null) return;
-
-            _planExecutor.InvalidateWindowCache(key);
-            _logger.Info(opId, _state.Generation, key, newLocked ? "StandardUiRelock" : "StandardUiUnlock",
-                newLocked
-                    ? "Inspector re-locked outside Manager; returning to rotation."
-                    : "Inspector unlocked while focused/hovered; treating as manual unlock (leaves rotation).");
-
-            ApplyReduceAndRunEffects(new ManualLockChangedEvent(opId, _state.Generation, key, newLocked), flashedWindows);
-            ApplyReduce(new StatusNoticeEvent(
-                opId,
-                _state.Generation,
-                newLocked
-                    ? "Inspector #" + win.FixedDisplayNumber + " was re-locked and rejoined rotation."
-                    : "Inspector #" + win.FixedDisplayNumber + " was unlocked manually and left rotation."));
         }
 
         private void RecoverUnknownLockDrop(WindowKey key, HashSet<WindowKey> flashedWindows)
@@ -1650,7 +1230,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
                     observedLocked: false,
                     assignedSelection: null,
                     assignmentLabel: AssignmentLabel.None,
-                    lastSuccessSequence: 0,
                     entityGeneration: 1,
                     observedRepresentativeName: string.Empty,
                     identityEvidence: e.IdentityEvidence));
@@ -1671,7 +1250,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
             }
 
             var journal = load.Value;
-            // Section 9 & 10: NEVER automatically modify locks across Editor restarts using temporary runtime IDs!
             if (!string.Equals(journal.EditorSessionId, _editorSessionId, StringComparison.Ordinal))
             {
                 _persistenceStore.ClearRecoveryJournal();
@@ -1682,7 +1260,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 return;
             }
 
-            // Same Editor session (e.g., after Assembly Reload): restore only verified surviving identical windows.
             var leaseDict = new Dictionary<WindowKey, LockLease>();
             for (int i = 0; i < journal.Leases.Count; i++)
             {
@@ -1721,74 +1298,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
             }
         }
 
-        private void RefreshFavoriteResolutionsInternal(string opId)
-        {
-            if (_state.Favorites.Count == 0) return;
-
-            bool anyChanged = false;
-            bool persistentUpgraded = false;
-            var updated = new List<FavoriteEntry>(_state.Favorites.Count);
-
-            for (int i = 0; i < _state.Favorites.Count; i++)
-            {
-                var fav = _state.Favorites[i];
-                var res = _favoriteResolver.Resolve(fav);
-
-                // Section 14.4: Auto-cleanup NEVER removes SceneUnloaded or pending items; only DeletedOrMissing if explicitly enabled.
-                if (_state.Settings.AutoCleanupMissingFavorites && res.State == FavoriteResolutionState.DeletedOrMissing)
-                {
-                    anyChanged = true;
-                    persistentUpgraded = true;
-                    continue;
-                }
-
-                bool upgraded = fav.IsTemporary && res.UpgradedPersistentId.HasValue && !res.UpgradedPersistentId.Value.IsEmpty;
-                var nextFav = fav.With(
-                    persistentId: upgraded ? res.UpgradedPersistentId : (PersistentObjectId?)null,
-                    displayNameCache: !string.IsNullOrEmpty(res.ResolvedDisplayName) ? res.ResolvedDisplayName : fav.DisplayNameCache,
-                    typeNameCache: !string.IsNullOrEmpty(res.ResolvedTypeName) ? res.ResolvedTypeName : fav.TypeNameCache,
-                    sortOrder: updated.Count,
-                    isTemporary: upgraded ? false : fav.IsTemporary,
-                    resolutionState: res.State,
-                    resolutionDetail: res.Detail);
-
-                if (upgraded) persistentUpgraded = true;
-                if (nextFav.ResolutionState != fav.ResolutionState || upgraded || !string.Equals(nextFav.DisplayNameCache, fav.DisplayNameCache, StringComparison.Ordinal))
-                {
-                    anyChanged = true;
-                }
-
-                updated.Add(nextFav);
-            }
-
-            if (anyChanged)
-            {
-                _state = _state.With(favorites: updated);
-                if (persistentUpgraded)
-                {
-                    QueuePersistSettings();
-                }
-            }
-        }
-
-        private void UpdateSingleFavoriteResolution(string favoriteId, FavoriteResolutionResult res)
-        {
-            var updated = _state.Favorites.Select(f =>
-            {
-                if (!string.Equals(f.FavoriteId, favoriteId, StringComparison.Ordinal)) return f;
-                bool upgraded = f.IsTemporary && res.UpgradedPersistentId.HasValue && !res.UpgradedPersistentId.Value.IsEmpty;
-                return f.With(
-                    persistentId: upgraded ? res.UpgradedPersistentId : (PersistentObjectId?)null,
-                    displayNameCache: !string.IsNullOrEmpty(res.ResolvedDisplayName) ? res.ResolvedDisplayName : f.DisplayNameCache,
-                    typeNameCache: !string.IsNullOrEmpty(res.ResolvedTypeName) ? res.ResolvedTypeName : f.TypeNameCache,
-                    isTemporary: upgraded ? false : f.IsTemporary,
-                    resolutionState: res.State,
-                    resolutionDetail: res.Detail);
-            }).ToArray();
-
-            _state = _state.With(favorites: updated);
-        }
-
         private bool IsSelectionEligibleForRotation(SelectionSnapshot snapshot)
         {
             if (snapshot == null || snapshot.IsEmpty) return false;
@@ -1811,8 +1320,8 @@ namespace DennokoWorks.InspectorManagerV2.Application
 
         private void QueuePersistSettings()
         {
-            var dto = SettingsAndFavoritesDto.FromDomain(_projectId, _state.Settings, _state.Favorites);
-            var res = _persistenceStore.QueueSaveSettingsAndFavorites(dto, _state.Settings.SettingsRevision);
+            var dto = SettingsDto.FromDomain(_projectId, _state.Settings);
+            var res = _persistenceStore.QueueSaveSettings(dto, _state.Settings.SettingsRevision);
             if (res.BlockedByNewerSchema)
             {
                 _state = _state.With(persistenceWriteBlocked: true, statusNotice: "Saving paused: newer schema detected.");
@@ -1864,7 +1373,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
         private static bool IsWritePlanCommand(string kind)
         {
             return kind == "SelectionSnapshot"
-                || kind == "ResumeRotation"
                 || kind == "ReorderWindow"
                 || kind == "UpdateSettings"
                 || kind == "ResetSettings"

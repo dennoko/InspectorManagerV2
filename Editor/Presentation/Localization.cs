@@ -5,7 +5,7 @@ using DennokoWorks.InspectorManagerV2.Domain;
 namespace DennokoWorks.InspectorManagerV2.Presentation
 {
     /// <summary>
-    /// Complete Japanese (ja) and English (en) UI localization table (Section 14.3).
+    /// Japanese (ja) and English (en) UI localization table for Inspector Manager V2.
     /// </summary>
     public static class Localization
     {
@@ -14,92 +14,64 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
             ["WindowTitle"] = ("Inspector Manager V2", "Inspector Manager V2"),
             ["Start"] = ("開始", "Start"),
             ["Stop"] = ("終了", "Stop"),
-            ["Pause"] = ("一時停止", "Pause"),
-            ["Resume"] = ("再開", "Resume"),
             ["RetryRestore"] = ("復元を再試行", "Retry Restore"),
             ["AddInspector"] = ("+ Inspector追加", "+ Add Inspector"),
-            ["LockAll"] = ("一括ロック ({0})", "Lock All ({0})"),
-            ["UnlockAll"] = ("一括解除 ({0})", "Unlock All ({0})"),
-            ["ModeHistory"] = ("履歴モード", "History Mode"),
-            ["ModeCycle"] = ("サイクルモード", "Cycle Mode"),
-            ["ModeHistoryHint"] = ("※「1つ前」は異なる選択の最近使用順 (MRU) を表します。", "* 'Previous' shows distinct selections in MRU order."),
-            ["ModeCycleHint"] = ("※ 更新成功が最も古い参加Inspectorを1つ更新します。", "* Updates the participating Inspector with the oldest update."),
-            ["Back"] = ("◀ 戻る", "◀ Back"),
-            ["Forward"] = ("進む ▶", "Forward ▶"),
+            ["RefreshTooltip"] = ("Inspector 一覧を再検出", "Refresh Inspector list"),
+            ["ResetLayoutTooltip"] = ("並び順・除外状態を初期値に戻す", "Reset order and exclusions"),
+            ["MenuRefresh"] = ("Inspector 一覧を再検出", "Refresh Inspector List"),
+            ["MenuResetLayout"] = ("配置・除外状態をリセット", "Reset Order & Exclusions"),
 
-            ["TabInspectors"] = ("Inspector一覧", "Inspectors"),
-            ["TabHistory"] = ("選択履歴", "History"),
-            ["TabFavorites"] = ("お気に入り", "Favorites"),
-            ["TabSettings"] = ("設定・診断", "Settings & Diagnostics"),
-
-            ["StatusOff"] = ("停止 (Off)", "Off"),
-            ["StatusStarting"] = ("開始処理中", "Starting"),
+            ["StatusOff"] = ("停止中 (Off)", "Off"),
+            ["StatusStarting"] = ("開始処理中…", "Starting..."),
             ["StatusRunning"] = ("稼働中", "Running"),
-            ["StatusPaused"] = ("一時停止中", "Paused"),
             ["StatusSuspended"] = ("安全停止中 (再読込/Play)", "Suspended"),
-            ["StatusStopping"] = ("終了処理中", "Stopping"),
+            ["StatusStopping"] = ("終了処理中…", "Stopping..."),
             ["StatusFaulted"] = ("障害・復元未完了", "Faulted (Incomplete Restore)"),
+            ["RunningBannerDetail"] = ("履歴モード (MRU) で自動割当を実行中", "Auto-assigning in History Mode (MRU)"),
 
             ["ManagedInspectors"] = ("管理対象 Inspector ({0})", "Managed Inspectors ({0})"),
-            ["ExternalInspectors"] = ("外部で開かれた Inspector ({0}) — 自動ロックしません", "External Inspectors ({0}) — Not auto-locked"),
-            ["NoManagedInspectors"] = ("管理対象のInspectorがありません。「+ Inspector追加」または下の外部Inspectorから管理に追加してください。", "No managed Inspectors. Click '+ Add Inspector' or adopt an external Inspector below."),
+            ["ExternalInspectors"] = ("外部 Inspector ({0})", "External Inspectors ({0})"),
+            ["NoManagedInspectors"] = ("管理対象の Inspector がありません", "No managed Inspectors."),
+            ["ExternalHint"] = ("外部で開かれた Inspector は自動ロックしません。「管理に追加」で対象へ含めます。", "Externally opened Inspectors are never auto-locked. Click Manage to adopt."),
+            ["HistoryMruHint"] = ("※「-1」「-2」は異なる選択の最近使用順 (MRU) を表します。標準の鍵アイコンでも個別解除できます。", "* '-1', '-2' represent distinct selections in MRU order. You can also toggle locks via the standard padlock."),
             ["Adopt"] = ("管理に追加", "Manage"),
-            ["ResetLayout"] = ("配置・除外をリセット", "Reset Layout"),
-            ["Refresh"] = ("再検出", "Refresh"),
+            ["FooterSummary"] = ("参加 {0} / 管理 {1}", "Active {0} / Managed {1}"),
 
             ["RoleLatest"] = ("最新", "Latest"),
-            ["RoleCycleNext"] = ("次候補", "Next"),
-            ["RoleCycle"] = ("サイクル", "Cycle"),
             ["StateParticipating"] = ("参加中", "Active"),
             ["StateExcluded"] = ("除外中", "Excluded"),
             ["StateManuallyUnlocked"] = ("手動解除", "Unlocked"),
             ["StateFaultIsolated"] = ("故障隔離", "Faulted"),
             ["LabelInitialDisplay"] = ("開始時表示", "Initial Display"),
-            ["LabelHistoryUnassigned"] = ("履歴未割当", "History Unassigned"),
+            ["LabelHistoryUnassigned"] = ("履歴未割当", "Unassigned"),
+            ["EmptyTarget"] = ("(未表示)", "(Empty)"),
 
-            ["BtnLock"] = ("🔒", "🔒"),
-            ["BtnUnlock"] = ("🔓", "🔓"),
-            ["BtnExclude"] = ("除外", "Exclude"),
-            ["BtnInclude"] = ("復帰", "Include"),
-            ["BtnFocus"] = ("表示", "Focus"),
-            ["BtnClose"] = ("×", "×"),
-            ["ManualUnlockHint"] = ("※ 管理中の手動ロック解除にはManagerまたはCtrl+L/オーバーレイを使用してください。", "* Use Manager, Ctrl+L, or Overlay to manually unlock during rotation."),
+            ["BtnLock"] = ("鍵ON", "Locked"),
+            ["BtnUnlock"] = ("鍵OFF", "Open"),
+            ["BtnExclude"] = ("除外", "Excl"),
+            ["BtnInclude"] = ("復帰", "Incl"),
+            ["BtnFocus"] = ("表示", "Show"),
+            ["BtnCloseTooltip"] = ("ロックを復元して閉じる", "Restore lock and close"),
+            ["BtnUpTooltip"] = ("優先順を上げる", "Move up"),
+            ["BtnDownTooltip"] = ("優先順を下げる", "Move down"),
 
-            ["HistoryEmpty"] = ("選択履歴はまだありません（現在のEditorセッション内のみ保持されます）。", "No selection history yet (kept for the current Editor session only)."),
-            ["ClearHistory"] = ("履歴をクリア", "Clear History"),
-            ["DragHint"] = ("クリックで選択移動 / ドラッグでUnityへドロップ可能", "Click to navigate / Drag to drop into Unity"),
-
-            ["AddCurrentFavorite"] = ("現在の選択をお気に入りに追加", "Add Current Selection"),
-            ["FavoriteDropZone"] = ("ここにGameObjectまたはアセットをドラッグ＆ドロップして登録", "Drag & Drop GameObjects or Assets here to add"),
-            ["FavoritesEmpty"] = ("お気に入りは登録されていません。", "No favorites registered."),
-            ["FavResolved"] = ("解決済み", "Resolved"),
-            ["FavTemporary"] = ("一時登録(未保存)", "Temporary (Unsaved)"),
-            ["FavSceneUnloaded"] = ("シーン未ロード", "Scene Unloaded"),
-            ["FavMissing"] = ("欠落/削除", "Missing"),
-            ["FavFailed"] = ("解決失敗", "Failed"),
-            ["BtnSelect"] = ("選択", "Select"),
-            ["BtnPing"] = ("強調", "Ping"),
-            ["BtnRemove"] = ("削除", "Remove"),
-
-            ["SettingsHeader"] = ("基本設定", "General Settings"),
-            ["Language"] = ("表示言語 / Language", "Language / 表示言語"),
-            ["MaxNavHistory"] = ("選択履歴の最大件数", "Max Navigation History"),
-            ["MaxRotHistory"] = ("ローテーション履歴の最大件数", "Max Rotation History"),
+            ["AdvancedSettings"] = ("詳細設定", "Advanced Settings"),
+            ["MaxRotHistory"] = ("履歴保持数", "History Capacity"),
             ["RecordSceneObjects"] = ("シーン内オブジェクトを記録", "Record Scene Objects"),
             ["RecordAssets"] = ("アセットを記録", "Record Assets"),
-            ["AutoFocus"] = ("更新時にInspectorへ自動フォーカス（連続選択中は奪わない）", "Auto-focus updated Inspector (respects continuous selection)"),
-            ["ShowOverlays"] = ("各Inspectorにオーバーレイを表示", "Show Inspector Overlays"),
-            ["AutoCleanupFavs"] = ("削除済みお気に入りを自動クリーンアップ（未ロードシーンは除外）", "Auto-cleanup deleted favorites (never removes unloaded scenes)"),
+            ["ShowOverlays"] = ("各 Inspector にオーバーレイを表示", "Show Inspector Overlays"),
             ["BlockedCategoriesHeader"] = ("カテゴリ別更新ブロック", "Category Update Blocking"),
             ["BlockedCategoriesHint"] = ("選択中の有効対象すべてがブロック対象の場合のみ更新を抑止します（例：フォルダ+GameObjectの混合選択は全体を表示）。", "Blocks assignment only when ALL selected targets are blocked (e.g. Folder + GameObject mixed selection passes through)."),
-            ["ResetSettings"] = ("設定を既定値に戻す", "Reset Settings to Defaults"),
 
-            ["DiagnosticsHeader"] = ("診断・能力・メトリクス", "Diagnostics, Capabilities & Metrics"),
-            ["CopyDiagnostics"] = ("診断情報をコピー", "Copy Diagnostics"),
-            ["ClearLogs"] = ("ログをクリア", "Clear Logs"),
-            ["PendingVerifyBanner"] = ("検証待機中 (PresentationPending)...", "Awaiting Inspector verification (PresentationPending)..."),
-            ["RotationUnavailable"] = ("内部API能力不足のため自動ローテーションは無効です。履歴・お気に入りは継続利用できます。", "Auto-rotation disabled due to missing internal API capabilities. History & Favorites remain available."),
-            ["PersistenceBlocked"] = ("保存ファイルが新しいスキーマ版のため上書き保存を停止しています。", "Saving paused because storage file uses a newer schema version.")
+            ["ChipBlocked"] = ("ブロック {0}件", "Blocked: {0}"),
+            ["ChipSceneOff"] = ("シーン除外", "No Scene"),
+            ["ChipAssetsOff"] = ("アセット除外", "No Assets"),
+            ["ChipOverlayOff"] = ("オーバーレイOFF", "Overlay Off"),
+            ["ChipHistory"] = ("履歴 {0}", "Cap {0}"),
+
+            ["PendingVerifyBanner"] = ("Inspector の反映を検証中…", "Verifying Inspector update..."),
+            ["RotationUnavailable"] = ("Unity 内部 API の能力不足のため履歴自動割当を利用できません。", "Auto-assignment disabled due to missing Unity Inspector API capabilities."),
+            ["PersistenceBlocked"] = ("設定ファイルが新しいスキーマ版のため上書き保存を停止しています。", "Saving paused because settings file uses a newer schema version.")
         };
 
         public static string Get(string lang, string key)
@@ -123,7 +95,6 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
                 case RuntimeLifecycleState.Off: return Get(lang, "StatusOff");
                 case RuntimeLifecycleState.Starting: return Get(lang, "StatusStarting");
                 case RuntimeLifecycleState.Running: return Get(lang, "StatusRunning");
-                case RuntimeLifecycleState.Paused: return Get(lang, "StatusPaused");
                 case RuntimeLifecycleState.Suspended: return Get(lang, "StatusSuspended");
                 case RuntimeLifecycleState.Stopping: return Get(lang, "StatusStopping");
                 case RuntimeLifecycleState.Faulted: return Get(lang, "StatusFaulted");

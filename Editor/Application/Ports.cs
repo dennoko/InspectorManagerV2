@@ -112,32 +112,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
         public static AdapterResult Fail(string error) => new AdapterResult(false, error);
     }
 
-    public sealed class FavoriteResolutionResult
-    {
-        public FavoriteResolutionState State { get; }
-        public ObjectRefKey? ResolvedRuntimeKey { get; }
-        public PersistentObjectId? UpgradedPersistentId { get; }
-        public string ResolvedDisplayName { get; }
-        public string ResolvedTypeName { get; }
-        public string Detail { get; }
-
-        public FavoriteResolutionResult(
-            FavoriteResolutionState state,
-            ObjectRefKey? resolvedRuntimeKey,
-            PersistentObjectId? upgradedPersistentId,
-            string resolvedDisplayName,
-            string resolvedTypeName,
-            string detail)
-        {
-            State = state;
-            ResolvedRuntimeKey = resolvedRuntimeKey;
-            UpgradedPersistentId = upgradedPersistentId;
-            ResolvedDisplayName = resolvedDisplayName ?? string.Empty;
-            ResolvedTypeName = resolvedTypeName ?? string.Empty;
-            Detail = detail ?? string.Empty;
-        }
-    }
-
     public sealed class LoadResult<T>
     {
         public bool Succeeded { get; }
@@ -181,35 +155,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
         public static SaveResult Fail(string error) => new SaveResult(false, false, error);
     }
 
-    public sealed class PerformanceMetrics
-    {
-        public double LastSelectionToCommitMs { get; }
-        public double LastPlanExecutionMs { get; }
-        public int CurrentQueueDepth { get; }
-        public int PeakQueueDepth { get; }
-        public long TotalCommittedPlans { get; }
-        public long TotalWriteSkips { get; }
-        public long TotalAllocBytesEstimate { get; }
-
-        public PerformanceMetrics(
-            double lastSelectionToCommitMs,
-            double lastPlanExecutionMs,
-            int currentQueueDepth,
-            int peakQueueDepth,
-            long totalCommittedPlans,
-            long totalWriteSkips,
-            long totalAllocBytesEstimate)
-        {
-            LastSelectionToCommitMs = lastSelectionToCommitMs;
-            LastPlanExecutionMs = lastPlanExecutionMs;
-            CurrentQueueDepth = currentQueueDepth;
-            PeakQueueDepth = peakQueueDepth;
-            TotalCommittedPlans = totalCommittedPlans;
-            TotalWriteSkips = totalWriteSkips;
-            TotalAllocBytesEstimate = totalAllocBytesEstimate;
-        }
-    }
-
     public interface IInspectorAdapter
     {
         AdapterCapabilities ProbeCapabilities();
@@ -221,15 +166,13 @@ namespace DennokoWorks.InspectorManagerV2.Application
         AdapterVerifyResult VerifyTargetsAndLock(WindowKey key, IReadOnlyList<ObjectRefKey> expectedTargets, bool expectedLocked);
         AdapterWindowCreateResult CreateInspectorWindow();
         AdapterResult CloseInspectorWindow(WindowKey key, string expectedIdentityEvidence);
-        WindowKey? GetFocusedInspectorKey();
 
         /// <summary>
-        /// True when the given Inspector is currently focused or under the mouse cursor.
+        /// Returns true if the given Inspector is currently focused or under the mouse cursor.
         /// Used as evidence that an observed lock change came from the user via the standard Inspector UI (padlock etc.).
         /// </summary>
         bool IsUserInteractingWithInspector(WindowKey key);
 
-        bool IsSelectionSourceContinuous();
         void FocusInspector(WindowKey key);
         void InvalidateCache();
     }
@@ -237,26 +180,15 @@ namespace DennokoWorks.InspectorManagerV2.Application
     public interface ISelectionAdapter
     {
         SelectionSnapshot CaptureCurrentSelection(long sequence, long generation, SelectionSource source);
-        bool TrySetGlobalSelection(IReadOnlyList<ObjectRefKey> targets, ObjectRefKey? activeTarget, out string error);
         bool AreAllTargetsAlive(IReadOnlyList<ObjectRefKey> targets);
-        bool IsTargetAlive(ObjectRefKey key);
-        bool PingObject(ObjectRefKey key);
-        bool TryStartDrag(IReadOnlyList<ObjectRefKey> targets, string title, out string error);
-    }
-
-    public interface IFavoriteResolver
-    {
-        FavoriteResolutionResult Resolve(FavoriteEntry entry);
-        FavoriteEntry CreateFromLiveObject(ObjectRefKey key, int sortOrder);
-        void InvalidateCache();
     }
 
     public interface IPersistenceStore : IDisposable
     {
         bool IsWriteBlockedByNewerSchema { get; }
-        LoadResult<SettingsAndFavoritesDto> LoadSettingsAndFavorites();
-        SaveResult QueueSaveSettingsAndFavorites(SettingsAndFavoritesDto dto, long revision);
-        SaveResult FlushSettingsAndFavorites();
+        LoadResult<SettingsDto> LoadSettings();
+        SaveResult QueueSaveSettings(SettingsDto dto, long revision);
+        SaveResult FlushSettings();
         LoadResult<RecoveryJournalDto> LoadRecoveryJournal();
         SaveResult SaveRecoveryJournalImmediate(RecoveryJournalDto dto);
         void ClearRecoveryJournal();
@@ -279,8 +211,6 @@ namespace DennokoWorks.InspectorManagerV2.Application
     {
         void Info(string operationId, long generation, WindowKey? windowKey, string stage, string message);
         void Error(string operationId, long generation, WindowKey? windowKey, string stage, string message);
-        IReadOnlyList<DiagnosticLogEntry> GetRecentEntries();
-        void Clear();
     }
 
     public interface IOverlayPresenter : IDisposable

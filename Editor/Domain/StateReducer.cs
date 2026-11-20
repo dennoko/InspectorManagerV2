@@ -5,7 +5,7 @@ using System.Linq;
 namespace DennokoWorks.InspectorManagerV2.Domain
 {
     /// <summary>
-    /// Pure deterministic state reducer enforcing all invariants in Section 4, 5, 6, 7, 8, and 14.
+    /// Pure deterministic state reducer for History-mode Inspector management.
     /// Zero Unity API, clock, I/O, or UI dependencies.
     /// </summary>
     public static class StateReducer
@@ -15,13 +15,10 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             if (state == null) throw new ArgumentNullException(nameof(state));
             if (evt == null) return new ReduceResult(state);
 
-            // Invariant 5: Discard stale generation events except explicit lifecycle / capability updates.
             bool isGenerationAgnostic = evt is CapabilitiesProbedEvent
                 || evt is WindowsSynchronizedEvent
                 || evt is SettingsUpdatedEvent
-                || evt is FavoritesUpdatedEvent
                 || evt is StatusNoticeEvent
-                || evt is ClearNavigationHistoryEvent
                 || evt is ResetLayoutEvent;
 
             if (!isGenerationAgnostic && evt.Generation != 0 && evt.Generation != state.Generation)
@@ -43,12 +40,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 case StartSessionCompletedEvent e:
                     return ReduceStartCompleted(state, e);
 
-                case PauseRequestedEvent _:
-                    return ReducePauseRequested(state);
-
-                case ResumeRequestedEvent _:
-                    return ReduceResumeRequested(state);
-
                 case StopSessionRequestedEvent e:
                     return ReduceStopRequested(state, e);
 
@@ -61,12 +52,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 case SelectionReceivedEvent e:
                     return ReduceSelectionReceived(state, e);
 
-                case NavigationMoveRequestedEvent e:
-                    return ReduceNavigationMoveRequested(state, e);
-
-                case NavigationNotificationExpiredEvent e:
-                    return ReduceNavigationExpired(state, e);
-
                 case PlanCommittedEvent e:
                     return ReducePlanCommitted(state, e);
 
@@ -75,9 +60,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
 
                 case ManualLockChangedEvent e:
                     return ReduceManualLockChanged(state, e);
-
-                case BulkManualLockChangedEvent e:
-                    return ReduceBulkManualLockChanged(state, e);
 
                 case ExplicitExclusionChangedEvent e:
                     return ReduceExplicitExclusionChanged(state, e);
@@ -93,16 +75,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
 
                 case SettingsUpdatedEvent e:
                     return ReduceSettingsUpdated(state, e);
-
-                case FavoritesUpdatedEvent e:
-                    return new ReduceResult(
-                        state.With(favorites: e.Favorites),
-                        new ReducerEffect[] { new RequestPersistSettingsEffect() });
-
-                case ClearNavigationHistoryEvent _:
-                    return new ReduceResult(state.With(
-                        navigationHistory: NavigationHistoryState.Empty,
-                        clearPendingNavigation: true));
 
                 case ResetLayoutEvent _:
                     return ReduceResetLayout(state);
@@ -125,7 +97,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         {
             string notice = e.Capabilities.SupportsRotation
                 ? state.StatusNotice
-                : "Rotation disabled: required Unity Inspector capabilities unavailable. History & Favorites remain active.";
+                : "Rotation disabled: required Unity Inspector capabilities unavailable.";
 
             return new ReduceResult(state.With(
                 capabilities: e.Capabilities,
@@ -159,18 +131,16 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 {
                     updatedWindows.Add(existing.With(
                         isAlive: true,
-                        observedLocked: observed.ObservedLocked,
+                        observedLocked: observed.IsLockReadable ? observed.ObservedLocked : existing.ObservedLocked,
                         observedRepresentativeName: observed.RepresentativeName,
                         identityEvidence: string.IsNullOrEmpty(observed.IdentityEvidence) ? existing.IdentityEvidence : observed.IdentityEvidence));
                 }
                 else if (e.IsReloadGraceActive)
                 {
-                    // Section 9: Do not assume missing windows during reload grace period are closed.
                     updatedWindows.Add(existing);
                 }
                 else
                 {
-                    // Section 6.2: Window closed externally -> terminate registration and lease.
                     if (updatedLeases.TryGetValue(existing.Key, out var lease) && lease.RestorationStatus == LeaseRestorationStatus.Acquired)
                     {
                         updatedLeases[existing.Key] = lease.WithRestoration(LeaseRestorationStatus.WindowDisposed);
@@ -178,7 +148,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 }
             }
 
-            // Detect newly opened external Inspectors (Section 6.2: list them without modifying lock automatically!)
             bool hasManagedAlready = updatedWindows.Any(w => w.IsManaged && w.IsAlive);
             for (int i = 0; i < e.ObservedWindows.Count; i++)
             {
@@ -188,8 +157,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                     continue;
                 }
 
-                // Initial discovery when state had zero windows yet registers existing Inspectors as managed candidates (Off state only);
-                // once windows exist, externally opened Inspectors are listed as UnmanagedExternal until explicitly adopted.
                 bool autoManageOnBootstrap = state.Windows.Count == 0 && !hasManagedAlready && state.LifecycleState == RuntimeLifecycleState.Off;
                 int assignedNumber = nextNumber++;
                 int assignedRole = ++maxRoleOrder;
@@ -204,12 +171,11 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                     isManuallyUnlocked: false,
                     isFaultIsolated: false,
                     faultReason: string.Empty,
-                    observedLocked: obs.ObservedLocked,
+                    observedLocked: obs.IsLockReadable && obs.ObservedLocked,
                     assignedSelection: obs.ObservedLockedSelection,
                     assignmentLabel: obs.ObservedLockedSelection != null && !obs.ObservedLockedSelection.IsEmpty
                         ? AssignmentLabel.InitialDisplay
                         : AssignmentLabel.None,
-                    lastSuccessSequence: 0,
                     entityGeneration: 1,
                     observedRepresentativeName: obs.RepresentativeName,
                     identityEvidence: obs.IdentityEvidence));
@@ -238,8 +204,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                     statusNotice: "Rotation unavailable."));
             }
 
-            // Manual unlock (Section 6.1: "session-scoped") and fault isolation belong to the previous management session.
-            // Clear them so a new session does not lock these windows while never assigning to them.
+            // Clear session-scoped manual unlock and fault isolation from previous session.
             var freshWindows = state.Windows.Select(w => w.IsManuallyUnlocked || w.IsFaultIsolated
                 ? w.With(isManuallyUnlocked: false, isFaultIsolated: false, faultReason: string.Empty)
                 : w).ToArray();
@@ -250,7 +215,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 generation: state.Generation + 1,
                 lastError: string.Empty,
                 statusNotice: "Starting rotation...",
-                clearPendingNavigation: true,
                 clearLastStopReason: true));
         }
 
@@ -272,71 +236,24 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                     statusNotice: e.RestorationIncomplete ? "Start failed with incomplete lock restoration." : "Start failed; locks restored."));
             }
 
-            // Reset Cycle sequences on new management session start.
-            var resetWindows = state.Windows.Select(w => w.With(
-                lastSuccessSequence: 0,
+            var syncedWindows = state.Windows.Select(w => w.With(
                 observedLocked: e.Leases != null && e.Leases.TryGetValue(w.Key, out var lease) && lease.HasWritten
                     ? lease.LastWrittenLocked
                     : w.ObservedLocked)).ToArray();
 
             var nextState = state.With(
                 lifecycleState: RuntimeLifecycleState.Running,
-                windows: resetWindows,
+                windows: syncedWindows,
                 leases: e.Leases ?? state.Leases,
                 rotationHistory: e.SeededRotationHistory ?? RotationHistoryState.Empty,
                 lastError: string.Empty,
-                statusNotice: resetWindows.Any(w => w.CanParticipate) ? "Running" : "No participating Inspectors.");
+                statusNotice: syncedWindows.Any(w => w.CanParticipate) ? "Running" : "No participating Inspectors.");
 
-            var effects = new List<ReducerEffect> { new RequestPersistSessionLayoutEffect() };
-            if (state.Settings.Mode == RotationMode.History)
+            var effects = new List<ReducerEffect>
             {
-                effects.Add(new RequestReassignHistoryEffect(seedFromObservedIfEmpty: false));
-            }
-            else if (!state.CurrentLiveSelection.IsEmpty)
-            {
-                effects.Add(new RequestEvaluateCurrentSelectionEffect(state.CurrentLiveSelection, isNavigationUpdate: false));
-            }
-
-            return new ReduceResult(nextState, effects);
-        }
-
-        private static ReduceResult ReducePauseRequested(ManagerState state)
-        {
-            if (state.LifecycleState != RuntimeLifecycleState.Running)
-            {
-                return new ReduceResult(state);
-            }
-
-            // Section 6.3: Bump generation to drop queued stale assignments while keeping current display and locks.
-            return new ReduceResult(state.With(
-                lifecycleState: RuntimeLifecycleState.Paused,
-                generation: state.Generation + 1,
-                clearPendingNavigation: true,
-                statusNotice: "Paused"));
-        }
-
-        private static ReduceResult ReduceResumeRequested(ManagerState state)
-        {
-            if (state.LifecycleState != RuntimeLifecycleState.Paused)
-            {
-                return new ReduceResult(state);
-            }
-
-            var nextState = state.With(
-                lifecycleState: RuntimeLifecycleState.Running,
-                generation: state.Generation + 1,
-                statusNotice: "Running");
-
-            // Section 6.3: Evaluate current live selection once on resume; never replay buffered selections.
-            var effects = new List<ReducerEffect>();
-            if (nextState.Settings.Mode == RotationMode.History)
-            {
-                effects.Add(new RequestReassignHistoryEffect(seedFromObservedIfEmpty: false));
-            }
-            else if (!nextState.CurrentLiveSelection.IsEmpty)
-            {
-                effects.Add(new RequestEvaluateCurrentSelectionEffect(nextState.CurrentLiveSelection, isNavigationUpdate: false));
-            }
+                new RequestPersistSessionLayoutEffect(),
+                new RequestReassignHistoryEffect(seedFromObservedIfEmpty: false)
+            };
 
             return new ReduceResult(nextState, effects);
         }
@@ -348,7 +265,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 return new ReduceResult(state.With(
                     lifecycleState: e.SuspendMode ? RuntimeLifecycleState.Suspended : RuntimeLifecycleState.Off,
                     generation: state.Generation + 1,
-                    clearPendingNavigation: true,
                     lastStopReason: e.Reason));
             }
 
@@ -356,16 +272,14 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             return new ReduceResult(state.With(
                 lifecycleState: nextLifecycle,
                 generation: state.Generation + 1,
-                clearPendingNavigation: true,
                 lastStopReason: e.Reason,
                 statusNotice: e.SuspendMode ? "Suspended" : "Stopping..."));
         }
 
         private static ReduceResult ReduceStopCompleted(ManagerState state, StopSessionCompletedEvent e)
         {
-            // Section 6.1 & 10: Clear session-only RotationHistory & cycle sequences, but PRESERVE explicit exclusions, role order, fixed numbers.
+            // Clear session-only RotationHistory, but PRESERVE explicit exclusions, role order, and fixed numbers.
             var cleanedWindows = state.Windows.Select(w => w.With(
-                lastSuccessSequence: 0,
                 observedLocked: e.UpdatedLeases != null && e.UpdatedLeases.TryGetValue(w.Key, out var lease)
                     && lease.RestorationStatus == LeaseRestorationStatus.Restored
                     ? lease.OriginalLocked
@@ -387,14 +301,12 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 windows: cleanedWindows,
                 leases: e.AllRestored ? new Dictionary<WindowKey, LockLease>() : (e.UpdatedLeases ?? state.Leases),
                 rotationHistory: RotationHistoryState.Empty,
-                clearPendingNavigation: true,
                 lastError: e.AllRestored ? string.Empty : e.ErrorMessage,
                 statusNotice: e.AllRestored ? (e.RemainSuspended ? "Suspended" : "Off") : "Lock restoration incomplete."));
         }
 
         private static ReduceResult ReduceRetryRestoreCompleted(ManagerState state, RetryRestoreCompletedEvent e)
         {
-            // Section 6.3: RetryRestore NEVER automatically returns to Running.
             var cleanedWindows = state.Windows.Select(w => w.With(
                 observedLocked: e.UpdatedLeases != null && e.UpdatedLeases.TryGetValue(w.Key, out var lease)
                     && lease.RestorationStatus == LeaseRestorationStatus.Restored
@@ -414,15 +326,12 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             var incoming = e.Snapshot ?? SelectionSnapshot.Empty;
             var incomingKey = incoming.ComparisonKey;
 
-            // Section 5.2: Remove duplicate repeat of last accepted selection BEFORE matching ExpectedNavigationNotification,
-            // so a duplicate notification of the previous value does not consume the pending expectation.
             if (incomingKey == state.LastAcceptedSelectionKey)
             {
                 return new ReduceResult(state);
             }
 
-            // Section 5.1 #3: Empty selection is NOT added to NavigationHistory and keeps current Inspector assignments,
-            // BUT LastAcceptedSelectionKey IS updated to Empty so A -> Empty -> A is NOT discarded!
+            // Empty selection keeps current assignments, but updates LastAcceptedSelectionKey to Empty so A -> Empty -> A is accepted.
             if (incoming.IsEmpty)
             {
                 return new ReduceResult(state.With(
@@ -430,47 +339,9 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                     currentLiveSelection: SelectionSnapshot.Empty));
             }
 
-            // Section 5.2: Match ExpectedNavigationNotification to distinguish history navigation from user selection.
-            bool isNavigation = false;
-            ExpectedNavigationNotification nextPending = state.PendingNavigation;
-            NavigationHistoryState nextNavHistory = state.NavigationHistory;
-
-            if (state.PendingNavigation != null)
-            {
-                bool notExpired = e.NowMs <= state.PendingNavigation.ExpiresAtMs;
-                bool sameGen = state.PendingNavigation.Generation == state.Generation;
-                if (notExpired && sameGen && state.PendingNavigation.ExpectedKey == incomingKey)
-                {
-                    isNavigation = true;
-                    nextPending = null;
-                    nextNavHistory = state.NavigationHistory.MoveCursorTo(state.PendingNavigation.TargetHistoryIndex);
-                }
-                else
-                {
-                    // Different key arrived (or expired): treat as user selection and clear waiting state.
-                    nextPending = null;
-                    isNavigation = false;
-                }
-            }
-            else if (incoming.Source == SelectionSource.HistoryNavigation)
-            {
-                isNavigation = true;
-            }
-
-            if (!isNavigation)
-            {
-                // Section 6.3 & 5.5: NavigationHistory records user selection even when Paused or category-blocked.
-                nextNavHistory = nextNavHistory.RecordUserSelection(
-                    incoming.WithSource(SelectionSource.UserSelection),
-                    state.Settings.MaxNavigationHistory);
-            }
-
             var nextState = state.With(
                 lastAcceptedSelectionKey: incomingKey,
-                currentLiveSelection: incoming.WithSource(isNavigation ? SelectionSource.HistoryNavigation : SelectionSource.UserSelection),
-                navigationHistory: nextNavHistory,
-                pendingNavigation: nextPending,
-                clearPendingNavigation: nextPending == null);
+                currentLiveSelection: incoming.WithSource(SelectionSource.UserSelection));
 
             if (nextState.LifecycleState != RuntimeLifecycleState.Running)
             {
@@ -480,7 +351,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             var filterResult = SelectionFilter.Evaluate(nextState.CurrentLiveSelection, nextState.Settings);
             if (!filterResult.IsAllowed)
             {
-                // Section 5.5: NavigationHistory updated, but RotationHistory & cycle order do NOT advance.
                 return new ReduceResult(nextState.With(statusNotice: filterResult.Reason));
             }
 
@@ -491,88 +361,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
 
             return new ReduceResult(
                 nextState.With(statusNotice: "Running"),
-                new ReducerEffect[] { new RequestEvaluateCurrentSelectionEffect(nextState.CurrentLiveSelection, isNavigation) });
-        }
-
-        private static ReduceResult ReduceNavigationMoveRequested(ManagerState state, NavigationMoveRequestedEvent e)
-        {
-            if (e.TargetIndex < 0 || e.TargetIndex >= state.NavigationHistory.Entries.Count)
-            {
-                return new ReduceResult(state);
-            }
-
-            var targetSnapshot = state.NavigationHistory.Entries[e.TargetIndex];
-            if (targetSnapshot == null || targetSnapshot.IsEmpty)
-            {
-                return new ReduceResult(state);
-            }
-
-            var expected = new ExpectedNavigationNotification(
-                e.OperationId,
-                targetSnapshot.ComparisonKey,
-                state.Generation,
-                e.ExpiresAtMs,
-                e.TargetIndex);
-
-            // If target already matches current live selection, move cursor directly without waiting for a redundant SelectionChanged.
-            if (state.CurrentLiveSelection != null && state.CurrentLiveSelection.ComparisonKey == targetSnapshot.ComparisonKey)
-            {
-                var nextState = state.With(
-                    navigationHistory: state.NavigationHistory.MoveCursorTo(e.TargetIndex),
-                    clearPendingNavigation: true);
-
-                var effects = new List<ReducerEffect>();
-                if (nextState.LifecycleState == RuntimeLifecycleState.Running)
-                {
-                    var filter = SelectionFilter.Evaluate(targetSnapshot, nextState.Settings);
-                    if (filter.IsAllowed && nextState.GetParticipatingWindowsOrdered().Count > 0)
-                    {
-                        effects.Add(new RequestEvaluateCurrentSelectionEffect(
-                            targetSnapshot.WithSource(SelectionSource.HistoryNavigation),
-                            isNavigationUpdate: true));
-                    }
-                }
-                return new ReduceResult(nextState, effects);
-            }
-
-            return new ReduceResult(
-                state.With(pendingNavigation: expected),
-                new ReducerEffect[] { new RequestSetGlobalSelectionEffect(targetSnapshot, e.OperationId) });
-        }
-
-        private static ReduceResult ReduceNavigationExpired(ManagerState state, NavigationNotificationExpiredEvent e)
-        {
-            if (state.PendingNavigation == null)
-            {
-                return new ReduceResult(state);
-            }
-
-            var pending = state.PendingNavigation;
-            var observed = e.ObservedSelection ?? SelectionSnapshot.Empty;
-
-            // Section 5.2: Finalize via readback when notification never arrived.
-            if (!observed.IsEmpty && observed.ComparisonKey == pending.ExpectedKey)
-            {
-                var nextState = state.With(
-                    lastAcceptedSelectionKey: observed.ComparisonKey,
-                    currentLiveSelection: observed.WithSource(SelectionSource.HistoryNavigation),
-                    navigationHistory: state.NavigationHistory.MoveCursorTo(pending.TargetHistoryIndex),
-                    clearPendingNavigation: true);
-
-                var effects = new List<ReducerEffect>();
-                if (nextState.LifecycleState == RuntimeLifecycleState.Running)
-                {
-                    var filter = SelectionFilter.Evaluate(nextState.CurrentLiveSelection, nextState.Settings);
-                    if (filter.IsAllowed && nextState.GetParticipatingWindowsOrdered().Count > 0)
-                    {
-                        effects.Add(new RequestEvaluateCurrentSelectionEffect(nextState.CurrentLiveSelection, isNavigationUpdate: true));
-                    }
-                }
-
-                return new ReduceResult(nextState, effects);
-            }
-
-            return new ReduceResult(state.With(clearPendingNavigation: true));
+                new ReducerEffect[] { new RequestEvaluateCurrentSelectionEffect(nextState.CurrentLiveSelection) });
         }
 
         private static ReduceResult ReducePlanCommitted(ManagerState state, PlanCommittedEvent e)
@@ -595,12 +384,10 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 if (targetsByKey.TryGetValue(w.Key, out var target))
                 {
                     bool observedLock = e.VerifiedLocks.TryGetValue(w.Key, out var vl) ? vl : w.ObservedLocked;
-                    long nextSeq = target.AdvanceCycleSequence ? e.CommittedSequence : w.LastSuccessSequence;
                     updatedWindows.Add(w.With(
                         observedLocked: observedLock,
                         assignedSelection: target.KeepCurrentDisplay ? w.AssignedSelection : target.TargetSelection,
                         assignmentLabel: target.Label,
-                        lastSuccessSequence: nextSeq,
                         observedRepresentativeName: !target.KeepCurrentDisplay && target.TargetSelection != null
                             ? target.TargetSelection.BuildDisplaySummary()
                             : w.ObservedRepresentativeName));
@@ -614,13 +401,12 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             return new ReduceResult(state.With(
                 lastProcessedSequence: Math.Max(state.LastProcessedSequence, e.CommittedSequence),
                 windows: updatedWindows,
-                rotationHistory: e.Plan.Mode == RotationMode.History ? e.Plan.CandidateRotationHistory : state.RotationHistory,
+                rotationHistory: e.Plan.CandidateRotationHistory,
                 lastError: string.Empty));
         }
 
         private static ReduceResult ReducePlanFailed(ManagerState state, PlanFailedEvent e)
         {
-            // Section 8.2: Do NOT commit RotationHistory or LastSuccessSequence; stop auto-rotation.
             var updatedWindows = state.Windows.Select(w =>
             {
                 bool faulted = e.FaultedWindowKey.HasValue && w.Key == e.FaultedWindowKey.Value;
@@ -633,8 +419,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 return w.With(
                     isFaultIsolated: faulted || w.IsFaultIsolated,
                     faultReason: faulted ? e.ErrorMessage : w.FaultReason,
-                    observedLocked: restoredLock,
-                    lastSuccessSequence: 0);
+                    observedLocked: restoredLock);
             }).ToArray();
 
             return new ReduceResult(state.With(
@@ -643,7 +428,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 windows: updatedWindows,
                 leases: e.AllRestored ? new Dictionary<WindowKey, LockLease>() : (e.UpdatedLeases ?? state.Leases),
                 rotationHistory: RotationHistoryState.Empty,
-                clearPendingNavigation: true,
                 lastError: e.ErrorMessage,
                 statusNotice: e.AllRestored ? "Auto-rotation stopped after update failure (locks restored)." : "Update failed and lock restoration incomplete.",
                 lastStopReason: StopReason.ExecutionFailure));
@@ -651,7 +435,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
 
         private static ReduceResult ReduceManualLockChanged(ManagerState state, ManualLockChangedEvent e)
         {
-            bool isSessionActive = state.LifecycleState == RuntimeLifecycleState.Running || state.LifecycleState == RuntimeLifecycleState.Paused;
+            bool isSessionActive = state.LifecycleState == RuntimeLifecycleState.Running;
             var updatedLeases = new Dictionary<WindowKey, LockLease>(state.Leases);
             if (e.UpdatedLease != null)
             {
@@ -665,8 +449,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 var w = state.Windows[i];
                 if (w.Key == e.WindowKey)
                 {
-                    // Section 6.1: Manual unlock sets IsManuallyUnlocked ONLY (does NOT clear IsExplicitlyExcluded).
-                    // Re-lock clears IsManuallyUnlocked ONLY (does NOT clear IsExplicitlyExcluded).
                     bool nextManuallyUnlocked = isSessionActive ? !e.NewLocked : w.IsManuallyUnlocked;
                     var nextWindow = w.With(
                         observedLocked: e.NewLocked,
@@ -686,39 +468,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
 
             var nextState = state.With(windows: updatedWindows, leases: updatedLeases);
             var effects = new List<ReducerEffect> { new RequestPersistSessionLayoutEffect() };
-            if (participationChanged && nextState.LifecycleState == RuntimeLifecycleState.Running && nextState.Settings.Mode == RotationMode.History)
-            {
-                effects.Add(new RequestReassignHistoryEffect(seedFromObservedIfEmpty: false));
-            }
-            return new ReduceResult(nextState, effects);
-        }
-
-        private static ReduceResult ReduceBulkManualLockChanged(ManagerState state, BulkManualLockChangedEvent e)
-        {
-            bool isSessionActive = state.LifecycleState == RuntimeLifecycleState.Running || state.LifecycleState == RuntimeLifecycleState.Paused;
-            var affectedSet = new HashSet<WindowKey>(e.AffectedWindows);
-            var updatedWindows = new List<WindowRecord>(state.Windows.Count);
-
-            for (int i = 0; i < state.Windows.Count; i++)
-            {
-                var w = state.Windows[i];
-                if (affectedSet.Contains(w.Key))
-                {
-                    // Section 6.1: Bulk lock/unlock preserves IsExplicitlyExcluded and original Lease values.
-                    updatedWindows.Add(w.With(
-                        observedLocked: e.NewLocked,
-                        isManuallyUnlocked: isSessionActive ? !e.NewLocked : w.IsManuallyUnlocked,
-                        entityGeneration: w.EntityGeneration + 1));
-                }
-                else
-                {
-                    updatedWindows.Add(w);
-                }
-            }
-
-            var nextState = state.With(windows: updatedWindows);
-            var effects = new List<ReducerEffect> { new RequestPersistSessionLayoutEffect() };
-            if (nextState.LifecycleState == RuntimeLifecycleState.Running && nextState.Settings.Mode == RotationMode.History && e.NewLocked)
+            if (participationChanged && nextState.LifecycleState == RuntimeLifecycleState.Running)
             {
                 effects.Add(new RequestReassignHistoryEffect(seedFromObservedIfEmpty: false));
             }
@@ -744,7 +494,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
 
             var nextState = state.With(windows: updatedWindows, leases: updatedLeases);
             var effects = new List<ReducerEffect> { new RequestPersistSessionLayoutEffect() };
-            if (nextState.LifecycleState == RuntimeLifecycleState.Running && nextState.Settings.Mode == RotationMode.History)
+            if (nextState.LifecycleState == RuntimeLifecycleState.Running)
             {
                 effects.Add(new RequestReassignHistoryEffect(seedFromObservedIfEmpty: false));
             }
@@ -769,8 +519,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                     isManaged: true,
                     isAlive: true,
                     observedLocked: e.ObservedLocked,
-                    identityEvidence: string.IsNullOrEmpty(e.IdentityEvidence) ? updatedWindows[idx].IdentityEvidence : e.IdentityEvidence,
-                    lastSuccessSequence: 0);
+                    identityEvidence: string.IsNullOrEmpty(e.IdentityEvidence) ? updatedWindows[idx].IdentityEvidence : e.IdentityEvidence);
             }
             else
             {
@@ -787,7 +536,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                     observedLocked: e.ObservedLocked,
                     assignedSelection: null,
                     assignmentLabel: AssignmentLabel.None,
-                    lastSuccessSequence: 0,
                     entityGeneration: 1,
                     observedRepresentativeName: string.Empty,
                     identityEvidence: e.IdentityEvidence));
@@ -799,7 +547,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 leases: updatedLeases);
 
             var effects = new List<ReducerEffect> { new RequestPersistSessionLayoutEffect() };
-            if (nextState.LifecycleState == RuntimeLifecycleState.Running && nextState.Settings.Mode == RotationMode.History)
+            if (nextState.LifecycleState == RuntimeLifecycleState.Running)
             {
                 effects.Add(new RequestReassignHistoryEffect(seedFromObservedIfEmpty: false));
             }
@@ -832,7 +580,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 newRoleByKey[managed[i].Key] = i;
             }
 
-            // Section 2 & 5.4: Reordering changes RoleOrder ONLY; FixedDisplayNumber and Cycle LastSuccessSequence are preserved.
+            // Reordering changes RoleOrder ONLY; FixedDisplayNumber is preserved.
             var updatedWindows = state.Windows.Select(w =>
                 newRoleByKey.TryGetValue(w.Key, out int newOrder) ? w.With(roleOrder: newOrder) : w).ToArray();
 
@@ -841,7 +589,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 layoutOverrideRevision: state.LayoutOverrideRevision + 1);
 
             var effects = new List<ReducerEffect> { new RequestPersistSessionLayoutEffect() };
-            if (nextState.LifecycleState == RuntimeLifecycleState.Running && nextState.Settings.Mode == RotationMode.History)
+            if (nextState.LifecycleState == RuntimeLifecycleState.Running)
             {
                 effects.Add(new RequestReassignHistoryEffect(seedFromObservedIfEmpty: false));
             }
@@ -874,7 +622,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 leases: updatedLeases);
 
             var effects = new List<ReducerEffect> { new RequestPersistSessionLayoutEffect() };
-            if (nextState.LifecycleState == RuntimeLifecycleState.Running && nextState.Settings.Mode == RotationMode.History)
+            if (nextState.LifecycleState == RuntimeLifecycleState.Running)
             {
                 effects.Add(new RequestReassignHistoryEffect(seedFromObservedIfEmpty: false));
             }
@@ -883,31 +631,13 @@ namespace DennokoWorks.InspectorManagerV2.Domain
 
         private static ReduceResult ReduceSettingsUpdated(ManagerState state, SettingsUpdatedEvent e)
         {
-            bool modeChanged = state.Settings.Mode != e.NewSettings.Mode;
-            var updatedWindows = state.Windows;
-
-            // Section 5.4: Switching History -> Cycle resets all slots to equal sequence priority (0).
-            if (modeChanged && e.NewSettings.Mode == RotationMode.Cycle)
-            {
-                updatedWindows = state.Windows.Select(w => w.With(lastSuccessSequence: 0)).ToArray();
-            }
-
-            var trimmedNav = state.NavigationHistory.TrimToCapacity(e.NewSettings.MaxNavigationHistory);
             var nextState = state.With(
                 settings: e.NewSettings,
-                windows: updatedWindows,
-                navigationHistory: trimmedNav,
-                layoutOverrideRevision: (modeChanged || e.IsExplicitLayoutChange)
+                layoutOverrideRevision: e.IsExplicitLayoutChange
                     ? state.LayoutOverrideRevision + 1
                     : state.LayoutOverrideRevision);
 
-            var effects = new List<ReducerEffect> { new RequestPersistSettingsEffect() };
-            if (modeChanged && nextState.LifecycleState == RuntimeLifecycleState.Running && e.NewSettings.Mode == RotationMode.History)
-            {
-                effects.Add(new RequestReassignHistoryEffect(seedFromObservedIfEmpty: true));
-            }
-
-            return new ReduceResult(nextState, effects);
+            return new ReduceResult(nextState, new ReducerEffect[] { new RequestPersistSettingsEffect() });
         }
 
         private static ReduceResult ReduceResetLayout(ManagerState state)
@@ -919,8 +649,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                     isExplicitlyExcluded: false,
                     isManuallyUnlocked: false,
                     isFaultIsolated: false,
-                    faultReason: string.Empty,
-                    lastSuccessSequence: 0))
+                    faultReason: string.Empty))
                 .ToArray();
 
             var nextState = state.With(
@@ -928,7 +657,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 layoutOverrideRevision: state.LayoutOverrideRevision + 1);
 
             var effects = new List<ReducerEffect> { new RequestPersistSessionLayoutEffect() };
-            if (nextState.LifecycleState == RuntimeLifecycleState.Running && nextState.Settings.Mode == RotationMode.History)
+            if (nextState.LifecycleState == RuntimeLifecycleState.Running)
             {
                 effects.Add(new RequestReassignHistoryEffect(seedFromObservedIfEmpty: false));
             }
@@ -937,7 +666,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
 
         private static ReduceResult ReduceUnknownLockDrop(ManagerState state, UnknownLockDropDetectedEvent e)
         {
-            // Section 6.1 & 14.5 #2: Do NOT mark as ManuallyUnlocked! Increment EntityGeneration to invalidate cache and trigger recovery.
             var updatedWindows = state.Windows.Select(w =>
                 w.Key == e.WindowKey
                     ? w.With(observedLocked: false, entityGeneration: w.EntityGeneration + 1)

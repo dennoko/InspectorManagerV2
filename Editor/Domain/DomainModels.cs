@@ -12,22 +12,19 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         public ObjectCategory Category { get; }
         public bool IsAsset { get; }
         public bool ClassificationFailed => Category == ObjectCategory.ClassificationFailed;
-        public PersistentObjectId PersistentId { get; }
 
         public ObjectItemSnapshot(
             ObjectRefKey key,
             string displayName,
             string typeName,
             ObjectCategory category,
-            bool isAsset,
-            PersistentObjectId persistentId)
+            bool isAsset)
         {
             Key = key;
             DisplayName = string.IsNullOrEmpty(displayName) ? "(Unnamed)" : displayName;
             TypeName = typeName ?? string.Empty;
             Category = category;
             IsAsset = isAsset;
-            PersistentId = persistentId;
         }
     }
 
@@ -130,7 +127,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         public bool ObservedLocked { get; }
         public SelectionSnapshot AssignedSelection { get; }
         public AssignmentLabel AssignmentLabel { get; }
-        public long LastSuccessSequence { get; }
         public long EntityGeneration { get; }
         public string ObservedRepresentativeName { get; }
         public string IdentityEvidence { get; }
@@ -155,7 +151,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             bool observedLocked,
             SelectionSnapshot assignedSelection,
             AssignmentLabel assignmentLabel,
-            long lastSuccessSequence,
             long entityGeneration,
             string observedRepresentativeName,
             string identityEvidence)
@@ -172,7 +167,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             ObservedLocked = observedLocked;
             AssignedSelection = assignedSelection;
             AssignmentLabel = assignmentLabel;
-            LastSuccessSequence = lastSuccessSequence;
             EntityGeneration = entityGeneration;
             ObservedRepresentativeName = observedRepresentativeName ?? string.Empty;
             IdentityEvidence = identityEvidence ?? string.Empty;
@@ -190,7 +184,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             SelectionSnapshot assignedSelection = null,
             bool clearAssignedSelection = false,
             AssignmentLabel? assignmentLabel = null,
-            long? lastSuccessSequence = null,
             long? entityGeneration = null,
             string observedRepresentativeName = null,
             string identityEvidence = null)
@@ -208,7 +201,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 observedLocked ?? ObservedLocked,
                 clearAssignedSelection ? null : (assignedSelection ?? AssignedSelection),
                 assignmentLabel ?? AssignmentLabel,
-                lastSuccessSequence ?? LastSuccessSequence,
                 entityGeneration ?? EntityGeneration,
                 observedRepresentativeName ?? ObservedRepresentativeName,
                 identityEvidence ?? IdentityEvidence);
@@ -273,100 +265,30 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         }
     }
 
-    public sealed class FavoriteEntry
-    {
-        public string FavoriteId { get; }
-        public PersistentObjectId PersistentId { get; }
-        public string DisplayNameCache { get; }
-        public string TypeNameCache { get; }
-        public int SortOrder { get; }
-        public bool IsTemporary { get; }
-        public ObjectRefKey? TemporaryRuntimeKey { get; }
-        public FavoriteResolutionState ResolutionState { get; }
-        public string ResolutionDetail { get; }
-
-        public FavoriteEntry(
-            string favoriteId,
-            PersistentObjectId persistentId,
-            string displayNameCache,
-            string typeNameCache,
-            int sortOrder,
-            bool isTemporary,
-            ObjectRefKey? temporaryRuntimeKey,
-            FavoriteResolutionState resolutionState,
-            string resolutionDetail)
-        {
-            FavoriteId = favoriteId ?? Guid.NewGuid().ToString("N");
-            PersistentId = persistentId;
-            DisplayNameCache = string.IsNullOrEmpty(displayNameCache) ? "(Unnamed)" : displayNameCache;
-            TypeNameCache = typeNameCache ?? string.Empty;
-            SortOrder = sortOrder;
-            IsTemporary = isTemporary;
-            TemporaryRuntimeKey = temporaryRuntimeKey;
-            ResolutionState = resolutionState;
-            ResolutionDetail = resolutionDetail ?? string.Empty;
-        }
-
-        public FavoriteEntry With(
-            PersistentObjectId? persistentId = null,
-            string displayNameCache = null,
-            string typeNameCache = null,
-            int? sortOrder = null,
-            bool? isTemporary = null,
-            ObjectRefKey? temporaryRuntimeKey = null,
-            bool clearTemporaryRuntimeKey = false,
-            FavoriteResolutionState? resolutionState = null,
-            string resolutionDetail = null)
-        {
-            return new FavoriteEntry(
-                FavoriteId,
-                persistentId ?? PersistentId,
-                displayNameCache ?? DisplayNameCache,
-                typeNameCache ?? TypeNameCache,
-                sortOrder ?? SortOrder,
-                isTemporary ?? IsTemporary,
-                clearTemporaryRuntimeKey ? (ObjectRefKey?)null : (temporaryRuntimeKey ?? TemporaryRuntimeKey),
-                resolutionState ?? ResolutionState,
-                resolutionDetail ?? ResolutionDetail);
-        }
-    }
-
     public sealed class ManagerSettings
     {
         public long SettingsRevision { get; }
-        public RotationMode Mode { get; }
         public string Language { get; }
-        public int MaxNavigationHistory { get; }
         public int MaxRotationHistory { get; }
         public bool RecordSceneObjects { get; }
         public bool RecordAssets { get; }
-        public bool AutoFocusUpdatedInspector { get; }
-        public bool AutoCleanupMissingFavorites { get; }
         public bool ShowInspectorOverlays { get; }
         public IReadOnlyCollection<ObjectCategory> BlockedCategories { get; }
 
         public ManagerSettings(
             long settingsRevision,
-            RotationMode mode,
             string language,
-            int maxNavigationHistory,
             int maxRotationHistory,
             bool recordSceneObjects,
             bool recordAssets,
-            bool autoFocusUpdatedInspector,
-            bool autoCleanupMissingFavorites,
             bool showInspectorOverlays,
             IEnumerable<ObjectCategory> blockedCategories)
         {
             SettingsRevision = settingsRevision;
-            Mode = mode;
             Language = string.Equals(language, "en", StringComparison.OrdinalIgnoreCase) ? "en" : "ja";
-            MaxNavigationHistory = Clamp(maxNavigationHistory, 10, 500);
             MaxRotationHistory = Clamp(maxRotationHistory, 4, 200);
             RecordSceneObjects = recordSceneObjects;
             RecordAssets = recordAssets;
-            AutoFocusUpdatedInspector = autoFocusUpdatedInspector;
-            AutoCleanupMissingFavorites = autoCleanupMissingFavorites;
             ShowInspectorOverlays = showInspectorOverlays;
             BlockedCategories = blockedCategories != null
                 ? new HashSet<ObjectCategory>(blockedCategories)
@@ -377,40 +299,28 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         {
             return new ManagerSettings(
                 settingsRevision: revision,
-                mode: RotationMode.History,
                 language: "ja",
-                maxNavigationHistory: 50,
                 maxRotationHistory: 20,
                 recordSceneObjects: true,
                 recordAssets: true,
-                autoFocusUpdatedInspector: false,
-                autoCleanupMissingFavorites: false,
                 showInspectorOverlays: true,
                 blockedCategories: Array.Empty<ObjectCategory>());
         }
 
         public ManagerSettings WithNextRevision(
-            RotationMode? mode = null,
             string language = null,
-            int? maxNavigationHistory = null,
             int? maxRotationHistory = null,
             bool? recordSceneObjects = null,
             bool? recordAssets = null,
-            bool? autoFocusUpdatedInspector = null,
-            bool? autoCleanupMissingFavorites = null,
             bool? showInspectorOverlays = null,
             IEnumerable<ObjectCategory> blockedCategories = null)
         {
             return new ManagerSettings(
                 SettingsRevision + 1,
-                mode ?? Mode,
                 language ?? Language,
-                maxNavigationHistory ?? MaxNavigationHistory,
                 maxRotationHistory ?? MaxRotationHistory,
                 recordSceneObjects ?? RecordSceneObjects,
                 recordAssets ?? RecordAssets,
-                autoFocusUpdatedInspector ?? AutoFocusUpdatedInspector,
-                autoCleanupMissingFavorites ?? AutoCleanupMissingFavorites,
                 showInspectorOverlays ?? ShowInspectorOverlays,
                 blockedCategories ?? BlockedCategories);
         }
@@ -435,7 +345,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         public bool UsesWindowCombinedTargetLockApi { get; }
         public bool SupportsActiveTargetSelection { get; }
         public bool SupportsEmptyTargetCompensation { get; }
-        public bool CanDistinguishStandardUiManualUnlock { get; }
         public string DiagnosticSummary { get; }
 
         public bool SupportsRotation =>
@@ -456,7 +365,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             bool usesWindowCombinedTargetLockApi,
             bool supportsActiveTargetSelection,
             bool supportsEmptyTargetCompensation,
-            bool canDistinguishStandardUiManualUnlock,
             string diagnosticSummary)
         {
             CanEnumerateAndIdentify = canEnumerateAndIdentify;
@@ -469,13 +377,12 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             UsesWindowCombinedTargetLockApi = usesWindowCombinedTargetLockApi;
             SupportsActiveTargetSelection = supportsActiveTargetSelection;
             SupportsEmptyTargetCompensation = supportsEmptyTargetCompensation;
-            CanDistinguishStandardUiManualUnlock = canDistinguishStandardUiManualUnlock;
             DiagnosticSummary = diagnosticSummary ?? string.Empty;
         }
 
         public static AdapterCapabilities None(string reason = "Not probed")
         {
-            return new AdapterCapabilities(false, false, false, false, false, false, false, false, false, false, false, reason);
+            return new AdapterCapabilities(false, false, false, false, false, false, false, false, false, false, reason);
         }
 
         public static AdapterCapabilities Full(bool supportsActiveTarget = false, bool supportsEmptyCompensation = true)
@@ -491,68 +398,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 usesWindowCombinedTargetLockApi: true,
                 supportsActiveTargetSelection: supportsActiveTarget,
                 supportsEmptyTargetCompensation: supportsEmptyCompensation,
-                canDistinguishStandardUiManualUnlock: false,
                 diagnosticSummary: "Full capabilities");
-        }
-    }
-
-    public sealed class ExpectedNavigationNotification
-    {
-        public string OperationId { get; }
-        public SelectionComparisonKey ExpectedKey { get; }
-        public long Generation { get; }
-        public long ExpiresAtMs { get; }
-        public int TargetHistoryIndex { get; }
-
-        public ExpectedNavigationNotification(
-            string operationId,
-            SelectionComparisonKey expectedKey,
-            long generation,
-            long expiresAtMs,
-            int targetHistoryIndex)
-        {
-            OperationId = operationId ?? string.Empty;
-            ExpectedKey = expectedKey ?? SelectionComparisonKey.Empty;
-            Generation = generation;
-            ExpiresAtMs = expiresAtMs;
-            TargetHistoryIndex = targetHistoryIndex;
-        }
-    }
-
-    public sealed class DiagnosticLogEntry
-    {
-        public long TimestampMs { get; }
-        public string OperationId { get; }
-        public long Generation { get; }
-        public WindowKey? WindowKey { get; }
-        public string Stage { get; }
-        public string Message { get; }
-        public bool IsError { get; }
-        public int RepeatCount { get; }
-
-        public DiagnosticLogEntry(
-            long timestampMs,
-            string operationId,
-            long generation,
-            WindowKey? windowKey,
-            string stage,
-            string message,
-            bool isError,
-            int repeatCount = 1)
-        {
-            TimestampMs = timestampMs;
-            OperationId = operationId ?? string.Empty;
-            Generation = generation;
-            WindowKey = windowKey;
-            Stage = stage ?? string.Empty;
-            Message = message ?? string.Empty;
-            IsError = isError;
-            RepeatCount = repeatCount < 1 ? 1 : repeatCount;
-        }
-
-        public DiagnosticLogEntry WithIncrementedRepeat(long newTimestampMs)
-        {
-            return new DiagnosticLogEntry(newTimestampMs, OperationId, Generation, WindowKey, Stage, Message, IsError, RepeatCount + 1);
         }
     }
 
@@ -568,10 +414,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         public IReadOnlyList<WindowRecord> Windows { get; }
         public int NextFixedDisplayNumber { get; }
         public IReadOnlyDictionary<WindowKey, LockLease> Leases { get; }
-        public NavigationHistoryState NavigationHistory { get; }
         public RotationHistoryState RotationHistory { get; }
-        public ExpectedNavigationNotification PendingNavigation { get; }
-        public IReadOnlyList<FavoriteEntry> Favorites { get; }
         public string LastError { get; }
         public string StatusNotice { get; }
         public bool PersistenceWriteBlocked { get; }
@@ -593,10 +436,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             IReadOnlyList<WindowRecord> windows,
             int nextFixedDisplayNumber,
             IReadOnlyDictionary<WindowKey, LockLease> leases,
-            NavigationHistoryState navigationHistory,
             RotationHistoryState rotationHistory,
-            ExpectedNavigationNotification pendingNavigation,
-            IReadOnlyList<FavoriteEntry> favorites,
             string lastError,
             string statusNotice,
             bool persistenceWriteBlocked,
@@ -613,10 +453,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             Windows = windows ?? Array.Empty<WindowRecord>();
             NextFixedDisplayNumber = nextFixedDisplayNumber < 1 ? 1 : nextFixedDisplayNumber;
             Leases = leases ?? new Dictionary<WindowKey, LockLease>();
-            NavigationHistory = navigationHistory ?? NavigationHistoryState.Empty;
             RotationHistory = rotationHistory ?? RotationHistoryState.Empty;
-            PendingNavigation = pendingNavigation;
-            Favorites = favorites ?? Array.Empty<FavoriteEntry>();
             LastError = lastError ?? string.Empty;
             StatusNotice = statusNotice ?? string.Empty;
             PersistenceWriteBlocked = persistenceWriteBlocked;
@@ -637,10 +474,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 windows: Array.Empty<WindowRecord>(),
                 nextFixedDisplayNumber: 1,
                 leases: new Dictionary<WindowKey, LockLease>(),
-                navigationHistory: NavigationHistoryState.Empty,
                 rotationHistory: RotationHistoryState.Empty,
-                pendingNavigation: null,
-                favorites: Array.Empty<FavoriteEntry>(),
                 lastError: string.Empty,
                 statusNotice: string.Empty,
                 persistenceWriteBlocked: false,
@@ -659,11 +493,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             IReadOnlyList<WindowRecord> windows = null,
             int? nextFixedDisplayNumber = null,
             IReadOnlyDictionary<WindowKey, LockLease> leases = null,
-            NavigationHistoryState navigationHistory = null,
             RotationHistoryState rotationHistory = null,
-            ExpectedNavigationNotification pendingNavigation = null,
-            bool clearPendingNavigation = false,
-            IReadOnlyList<FavoriteEntry> favorites = null,
             string lastError = null,
             string statusNotice = null,
             bool? persistenceWriteBlocked = null,
@@ -682,10 +512,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                 windows ?? Windows,
                 nextFixedDisplayNumber ?? NextFixedDisplayNumber,
                 leases ?? Leases,
-                navigationHistory ?? NavigationHistory,
                 rotationHistory ?? RotationHistory,
-                clearPendingNavigation ? null : (pendingNavigation ?? PendingNavigation),
-                favorites ?? Favorites,
                 lastError ?? LastError,
                 statusNotice ?? StatusNotice,
                 persistenceWriteBlocked ?? PersistenceWriteBlocked,

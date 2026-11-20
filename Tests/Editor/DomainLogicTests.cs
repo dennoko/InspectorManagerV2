@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using DennokoWorks.InspectorManagerV2.Application;
 using DennokoWorks.InspectorManagerV2.Domain;
@@ -28,9 +27,9 @@ namespace DennokoWorks.InspectorManagerV2.Tests
         [Test]
         public void SelectionFilter_MixedFolderAndGameObject_PassesWholeSet_WhileAllBlockedSuppresses()
         {
-            var folder = new ObjectItemSnapshot(new ObjectRefKey("obj:f"), "Folder", "DefaultAsset", ObjectCategory.Folder, true, PersistentObjectId.Empty);
-            var go = new ObjectItemSnapshot(new ObjectRefKey("obj:g"), "Cube", "GameObject", ObjectCategory.GameObject, false, PersistentObjectId.Empty);
-            var failed = new ObjectItemSnapshot(new ObjectRefKey("obj:x"), "Broken", "Object", ObjectCategory.ClassificationFailed, false, PersistentObjectId.Empty);
+            var folder = new ObjectItemSnapshot(new ObjectRefKey("obj:f"), "Folder", "DefaultAsset", ObjectCategory.Folder, true);
+            var go = new ObjectItemSnapshot(new ObjectRefKey("obj:g"), "Cube", "GameObject", ObjectCategory.GameObject, false);
+            var failed = new ObjectItemSnapshot(new ObjectRefKey("obj:x"), "Broken", "Object", ObjectCategory.ClassificationFailed, false);
 
             var settings = ManagerSettings.CreateDefault().WithNextRevision(blockedCategories: new[] { ObjectCategory.Folder });
 
@@ -46,7 +45,7 @@ namespace DennokoWorks.InspectorManagerV2.Tests
         [Test]
         public void HistoryMode_AssignsByRoleOrder_KeepsFixedNumbers_DeduplicatesMru_AndMarksInsufficientSlots()
         {
-            var (coord, adapter, sel, _, _, clock) = CreateHarness(3);
+            var (coord, adapter, sel, _, _, _) = CreateHarness(3);
             sel.RegisterObject("A");
             sel.RegisterObject("B");
             sel.RegisterObject("C");
@@ -75,14 +74,12 @@ namespace DennokoWorks.InspectorManagerV2.Tests
             Assert.AreEqual("B", adapter.Get("w3").LockedTargets[0].Value);
             Assert.AreEqual("A", adapter.Get("w1").LockedTargets[0].Value);
 
-            // Select A again (A -> B -> A): History mode MRU must NOT duplicate A! Candidates=[A, B], NOT [A, B, A].
+            // Select A again (A -> B -> A): History mode MRU must NOT duplicate A! Candidates=[A, B].
             SelectAndTick(coord, sel, "A");
             Assert.AreEqual(2, coord.CurrentState.RotationHistory.Entries.Count);
             Assert.AreEqual("A", adapter.Get("w3").LockedTargets[0].Value);
             Assert.AreEqual("B", adapter.Get("w1").LockedTargets[0].Value);
             Assert.AreEqual(AssignmentLabel.HistoryUnassigned, coord.CurrentState.FindWindow(new WindowKey("w2")).AssignmentLabel);
-            // NavigationHistory still preserves full A -> B -> A sequence!
-            Assert.AreEqual(3, coord.CurrentState.NavigationHistory.Entries.Count);
 
             // Select C -> #3=C, #1=A, #2=B
             SelectAndTick(coord, sel, "C");
@@ -92,74 +89,35 @@ namespace DennokoWorks.InspectorManagerV2.Tests
         }
 
         [Test]
-        public void CycleMode_UpdatesOldestDeterministically_AndBackForwardDoesNotAdvanceOrder()
-        {
-            var (coord, adapter, sel, _, _, _) = CreateHarness(2);
-            sel.RegisterObject("A");
-            sel.RegisterObject("B");
-            sel.RegisterObject("C");
-
-            coord.EnqueueUpdateSettings(coord.CurrentState.Settings.WithNextRevision(mode: RotationMode.Cycle), true);
-            coord.EnqueueStartRotation();
-            coord.Tick();
-
-            // Select A -> w1 (oldest, tie broken by role order)
-            SelectAndTick(coord, sel, "A");
-            Assert.AreEqual("A", adapter.Get("w1").LockedTargets[0].Value);
-            long seqW1AfterA = coord.CurrentState.FindWindow(new WindowKey("w1")).LastSuccessSequence;
-            Assert.Greater(seqW1AfterA, 0);
-
-            // Select B -> w2 (sequence 0 < seqW1AfterA)
-            SelectAndTick(coord, sel, "B");
-            Assert.AreEqual("B", adapter.Get("w2").LockedTargets[0].Value);
-            long seqW2AfterB = coord.CurrentState.FindWindow(new WindowKey("w2")).LastSuccessSequence;
-            Assert.Greater(seqW2AfterB, seqW1AfterA);
-
-            // Navigate Back to A -> updates current oldest candidate (w1) WITHOUT advancing w1's sequence!
-            coord.EnqueueNavigateBack();
-            coord.Tick(); // executes NavigateBack -> fires OnGlobalSelectionChanged -> enqueues SelectionSnapshot
-            coord.Tick(); // processes SelectionSnapshot as HistoryNavigation
-            Assert.AreEqual("A", adapter.Get("w1").LockedTargets[0].Value);
-            Assert.AreEqual(seqW1AfterA, coord.CurrentState.FindWindow(new WindowKey("w1")).LastSuccessSequence,
-                "Back/Forward in Cycle mode must NOT advance LastSuccessSequence.");
-
-            // Next normal selection C still goes to w1 because its sequence did not advance!
-            SelectAndTick(coord, sel, "C");
-            Assert.AreEqual("C", adapter.Get("w1").LockedTargets[0].Value);
-            Assert.Greater(coord.CurrentState.FindWindow(new WindowKey("w1")).LastSuccessSequence, seqW2AfterB);
-        }
-
-        [Test]
-        public void EmptySelection_A_Empty_A_ReSelectsA_WithoutPollutingHistory()
+        public void EmptySelection_A_Empty_A_DoesNotDiscardReSelection()
         {
             var (coord, adapter, sel, _, _, _) = CreateHarness(2);
             sel.RegisterObject("A");
             sel.RegisterObject("B");
 
-            coord.EnqueueUpdateSettings(coord.CurrentState.Settings.WithNextRevision(mode: RotationMode.Cycle), true);
             coord.EnqueueStartRotation();
             coord.Tick();
 
             SelectAndTick(coord, sel, "A");
             Assert.AreEqual("A", adapter.Get("w1").LockedTargets[0].Value);
-            int navCountBeforeEmpty = coord.CurrentState.NavigationHistory.Entries.Count;
 
-            // Empty selection
+            // Empty selection keeps current assignments, updates LastAcceptedSelectionKey to Empty
             sel.CurrentSelection = SelectionSnapshot.Empty;
             coord.OnSelectionChangedImmediate();
             coord.Tick();
             Assert.AreEqual(SelectionComparisonKey.Empty, coord.CurrentState.LastAcceptedSelectionKey);
-            Assert.AreEqual(navCountBeforeEmpty, coord.CurrentState.NavigationHistory.Entries.Count, "Empty selection must not add to NavigationHistory.");
+            Assert.AreEqual("A", adapter.Get("w1").LockedTargets[0].Value);
 
             // Re-selecting A after empty must NOT be dropped as duplicate!
             SelectAndTick(coord, sel, "A");
-            Assert.AreEqual("A", adapter.Get("w2").LockedTargets[0].Value, "A -> Empty -> A must not be discarded as duplicate.");
+            Assert.AreEqual(new ObjectRefKey("A"), coord.CurrentState.CurrentLiveSelection.ActiveTarget);
+            Assert.AreEqual("A", adapter.Get("w1").LockedTargets[0].Value);
         }
 
         [Test]
-        public void ExplicitExclusion_AndManualUnlock_AreIndependent_AndPreservedAcrossBulkOps()
+        public void ExplicitExclusion_AndManualUnlock_AreIndependent()
         {
-            var (coord, adapter, sel, _, _, _) = CreateHarness(2);
+            var (coord, adapter, _, _, _, _) = CreateHarness(2);
             coord.EnqueueStartRotation();
             coord.Tick();
 
@@ -184,110 +142,54 @@ namespace DennokoWorks.InspectorManagerV2.Tests
             Assert.IsTrue(w1.IsExplicitlyExcluded, "Re-locking must NOT clear explicit exclusion.");
             Assert.IsFalse(w1.IsManuallyUnlocked);
             Assert.IsFalse(w1.CanParticipate);
-
-            // Bulk unlock & bulk lock must preserve explicit exclusion and original lease value (false)
-            coord.EnqueueBulkLock(false);
-            coord.Tick();
-            Assert.IsTrue(coord.CurrentState.FindWindow(new WindowKey("w1")).IsExplicitlyExcluded);
             Assert.IsFalse(coord.CurrentState.Leases[new WindowKey("w1")].OriginalLocked);
-
-            coord.EnqueueBulkLock(true);
-            coord.Tick();
-            Assert.IsTrue(coord.CurrentState.FindWindow(new WindowKey("w1")).IsExplicitlyExcluded);
-            Assert.IsFalse(coord.CurrentState.Leases[new WindowKey("w1")].OriginalLocked);
-        }
-
-        [Test]
-        public void NavigationBack_DuplicatePreviousNotification_AndExpiredExpectation_HandledCorrectly()
-        {
-            var (coord, adapter, sel, _, _, clock) = CreateHarness(2);
-            sel.RegisterObject("A");
-            sel.RegisterObject("B");
-
-            coord.EnqueueStartRotation();
-            coord.Tick();
-            SelectAndTick(coord, sel, "A");
-            SelectAndTick(coord, sel, "B");
-            Assert.AreEqual(2, coord.CurrentState.NavigationHistory.Entries.Count);
-            Assert.AreEqual(1, coord.CurrentState.NavigationHistory.CursorIndex);
-
-            // Suppress automatic notification so we can simulate delayed duplicate B then A
-            sel.EmitSelectionChangedOnSet = false;
-            coord.EnqueueNavigateBack();
-            coord.Tick();
-            Assert.IsNotNull(coord.CurrentState.PendingNavigation);
-
-            // Duplicate previous notification (B) arrives BEFORE A -> must NOT consume PendingNavigation!
-            coord.EnqueueSelectionSnapshot(sel.BuildSnapshot("B"));
-            coord.Tick();
-            Assert.IsNotNull(coord.CurrentState.PendingNavigation, "Duplicate old selection must not consume PendingNavigation.");
-
-            // Now simulate A notification NEVER arriving -> timeout triggers readback finalization!
-            clock.Advance(500);
-            coord.Tick();
-            Assert.IsNull(coord.CurrentState.PendingNavigation);
-            Assert.AreEqual(0, coord.CurrentState.NavigationHistory.CursorIndex);
-            Assert.AreEqual(2, coord.CurrentState.NavigationHistory.Entries.Count, "Back navigation must not append new history entry.");
         }
 
         [Test]
         public void RandomizedStateMachine_MaintainsAllInvariants()
         {
             var rng = new Random(20260924);
-            var (coord, adapter, sel, _, _, clock) = CreateHarness(3);
+            var (coord, _, sel, _, _, clock) = CreateHarness(3);
             for (int i = 0; i < 6; i++) sel.RegisterObject("O" + i);
 
             for (int step = 0; step < 250; step++)
             {
-                int op = rng.Next(12);
+                int op = rng.Next(8);
                 switch (op)
                 {
                     case 0: coord.EnqueueStartRotation(); break;
                     case 1: coord.EnqueueStopRotation(); break;
-                    case 2: coord.EnqueuePauseRotation(); break;
-                    case 3: coord.EnqueueResumeRotation(); break;
-                    case 4:
+                    case 2:
                         sel.CurrentSelection = sel.BuildSnapshot("O" + rng.Next(6));
                         coord.OnSelectionChangedImmediate();
                         break;
-                    case 5:
+                    case 3:
                         sel.CurrentSelection = SelectionSnapshot.Empty;
                         coord.OnSelectionChangedImmediate();
                         break;
-                    case 6:
+                    case 4:
                         coord.EnqueueToggleLock(new WindowKey("w" + (1 + rng.Next(3))));
                         break;
-                    case 7:
+                    case 5:
                         coord.EnqueueSetExcluded(new WindowKey("w" + (1 + rng.Next(3))), rng.Next(2) == 0);
                         break;
-                    case 8:
+                    case 6:
                         coord.EnqueueReorderWindow(new WindowKey("w" + (1 + rng.Next(3))), rng.Next(3));
                         break;
-                    case 9:
-                        coord.EnqueueUpdateSettings(coord.CurrentState.Settings.WithNextRevision(
-                            mode: rng.Next(2) == 0 ? RotationMode.History : RotationMode.Cycle), true);
-                        break;
-                    case 10:
-                        coord.EnqueueNavigateBack();
-                        break;
-                    case 11:
-                        coord.EnqueueNavigateForward();
+                    case 7:
+                        coord.EnqueueResetLayout();
                         break;
                 }
 
                 clock.Advance(50);
                 coord.Tick();
 
-                // Check core invariants after every random step!
                 var st = coord.CurrentState;
                 Assert.Greater(st.Generation, 0);
-                // Fixed display numbers must remain unique across all windows
                 var fixedNums = st.Windows.Select(w => w.FixedDisplayNumber).ToArray();
                 Assert.AreEqual(fixedNums.Length, fixedNums.Distinct().Count(), "FixedDisplayNumber must remain unique.");
-                // RotationHistory must never have duplicate keys
                 var rotKeys = st.RotationHistory.Entries.Select(e => e.Snapshot.ComparisonKey).ToArray();
                 Assert.AreEqual(rotKeys.Length, rotKeys.Distinct().Count(), "RotationHistory must never contain duplicates.");
-                // When Off cleanly, leases must be empty and all surviving windows restored to original (false)
                 if (st.LifecycleState == RuntimeLifecycleState.Off)
                 {
                     Assert.AreEqual(0, st.Leases.Count, "Off state must hold zero active leases.");
@@ -308,7 +210,6 @@ namespace DennokoWorks.InspectorManagerV2.Tests
                 adapter.AddFakeWindow("w" + i, locked: initialLocked);
             }
 
-            var favResolver = new FakeFavoriteResolver(sel);
             var persist = new FakePersistenceStore();
             var session = new FakeSessionLayoutStore();
 
@@ -316,7 +217,6 @@ namespace DennokoWorks.InspectorManagerV2.Tests
                 "test-proj",
                 adapter,
                 sel,
-                favResolver,
                 persist,
                 session,
                 clock,
@@ -325,10 +225,8 @@ namespace DennokoWorks.InspectorManagerV2.Tests
                 reconcileIntervalMs: 300,
                 persistDebounceMs: 500,
                 reloadGraceMs: 1000,
-                navigationTimeoutMs: 400,
                 pendingVerifyTimeoutMs: 300);
 
-            sel.OnGlobalSelectionChanged = () => coord.OnSelectionChangedImmediate();
             coord.Initialize();
             return (coord, adapter, sel, persist, session, clock);
         }

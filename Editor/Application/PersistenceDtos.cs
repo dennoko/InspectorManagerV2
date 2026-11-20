@@ -11,73 +11,34 @@ namespace DennokoWorks.InspectorManagerV2.Application
         public const int CurrentRecoverySchemaVersion = 1;
     }
 
-    public sealed class SettingsAndFavoritesDto
+    public sealed class SettingsDto
     {
         public string ProjectId { get; set; } = string.Empty;
         public long SettingsRevision { get; set; } = 1;
-        public string Mode { get; set; } = "History";
         public string Language { get; set; } = "ja";
-        public int MaxNavigationHistory { get; set; } = 50;
         public int MaxRotationHistory { get; set; } = 20;
         public bool RecordSceneObjects { get; set; } = true;
         public bool RecordAssets { get; set; } = true;
-        public bool AutoFocusUpdatedInspector { get; set; }
-        public bool AutoCleanupMissingFavorites { get; set; }
         public bool ShowInspectorOverlays { get; set; } = true;
         public List<string> BlockedCategories { get; set; } = new List<string>();
-        public List<FavoriteEntryDto> Favorites { get; set; } = new List<FavoriteEntryDto>();
 
-        public static SettingsAndFavoritesDto FromDomain(string projectId, ManagerSettings settings, IReadOnlyList<FavoriteEntry> favorites)
+        public static SettingsDto FromDomain(string projectId, ManagerSettings settings)
         {
-            var dto = new SettingsAndFavoritesDto
+            return new SettingsDto
             {
                 ProjectId = projectId ?? string.Empty,
                 SettingsRevision = settings.SettingsRevision,
-                Mode = settings.Mode.ToString(),
                 Language = settings.Language,
-                MaxNavigationHistory = settings.MaxNavigationHistory,
                 MaxRotationHistory = settings.MaxRotationHistory,
                 RecordSceneObjects = settings.RecordSceneObjects,
                 RecordAssets = settings.RecordAssets,
-                AutoFocusUpdatedInspector = settings.AutoFocusUpdatedInspector,
-                AutoCleanupMissingFavorites = settings.AutoCleanupMissingFavorites,
                 ShowInspectorOverlays = settings.ShowInspectorOverlays,
-                BlockedCategories = settings.BlockedCategories.Select(c => c.ToString()).OrderBy(x => x, StringComparer.Ordinal).ToList(),
-                Favorites = new List<FavoriteEntryDto>()
+                BlockedCategories = settings.BlockedCategories.Select(c => c.ToString()).OrderBy(x => x, StringComparer.Ordinal).ToList()
             };
-
-            if (favorites != null)
-            {
-                for (int i = 0; i < favorites.Count; i++)
-                {
-                    var fav = favorites[i];
-                    // Section 7: Unsaved temporary objects are never promised across restarts.
-                    if (fav.IsTemporary && fav.PersistentId.IsEmpty)
-                    {
-                        continue;
-                    }
-
-                    dto.Favorites.Add(new FavoriteEntryDto
-                    {
-                        FavoriteId = fav.FavoriteId,
-                        Kind = fav.PersistentId.Kind.ToString(),
-                        AssetGuid = fav.PersistentId.AssetGuid,
-                        LocalFileId = fav.PersistentId.LocalFileId,
-                        GlobalObjectIdString = fav.PersistentId.GlobalObjectIdString,
-                        SceneGuid = fav.PersistentId.SceneGuid,
-                        DisplayNameCache = fav.DisplayNameCache,
-                        TypeNameCache = fav.TypeNameCache,
-                        SortOrder = i
-                    });
-                }
-            }
-
-            return dto;
         }
 
         public ManagerSettings ToDomainSettings()
         {
-            RotationMode parsedMode = Enum.TryParse(Mode, true, out RotationMode m) ? m : RotationMode.History;
             var blocked = new List<ObjectCategory>();
             if (BlockedCategories != null)
             {
@@ -92,42 +53,12 @@ namespace DennokoWorks.InspectorManagerV2.Application
 
             return new ManagerSettings(
                 SettingsRevision <= 0 ? 1 : SettingsRevision,
-                parsedMode,
                 Language,
-                MaxNavigationHistory,
                 MaxRotationHistory,
                 RecordSceneObjects,
                 RecordAssets,
-                AutoFocusUpdatedInspector,
-                AutoCleanupMissingFavorites,
                 ShowInspectorOverlays,
                 blocked);
-        }
-
-        public IReadOnlyList<FavoriteEntry> ToDomainFavorites()
-        {
-            if (Favorites == null || Favorites.Count == 0)
-            {
-                return Array.Empty<FavoriteEntry>();
-            }
-
-            var list = new List<FavoriteEntry>(Favorites.Count);
-            foreach (var f in Favorites.OrderBy(x => x.SortOrder))
-            {
-                PersistentObjectKind kind = Enum.TryParse(f.Kind, true, out PersistentObjectKind k) ? k : PersistentObjectKind.None;
-                var pid = new PersistentObjectId(kind, f.AssetGuid, f.LocalFileId, f.GlobalObjectIdString, f.SceneGuid);
-                list.Add(new FavoriteEntry(
-                    string.IsNullOrEmpty(f.FavoriteId) ? Guid.NewGuid().ToString("N") : f.FavoriteId,
-                    pid,
-                    f.DisplayNameCache,
-                    f.TypeNameCache,
-                    list.Count,
-                    isTemporary: kind == PersistentObjectKind.Temporary,
-                    temporaryRuntimeKey: null,
-                    resolutionState: FavoriteResolutionState.ResolutionFailed,
-                    resolutionDetail: "Pending resolution"));
-            }
-            return list;
         }
 
         public Dictionary<string, object> ToJsonDictionary()
@@ -136,37 +67,27 @@ namespace DennokoWorks.InspectorManagerV2.Application
             {
                 ["projectId"] = ProjectId ?? string.Empty,
                 ["settingsRevision"] = SettingsRevision,
-                ["mode"] = Mode ?? "History",
                 ["language"] = Language ?? "ja",
-                ["maxNavigationHistory"] = MaxNavigationHistory,
                 ["maxRotationHistory"] = MaxRotationHistory,
                 ["recordSceneObjects"] = RecordSceneObjects,
                 ["recordAssets"] = RecordAssets,
-                ["autoFocusUpdatedInspector"] = AutoFocusUpdatedInspector,
-                ["autoCleanupMissingFavorites"] = AutoCleanupMissingFavorites,
                 ["showInspectorOverlays"] = ShowInspectorOverlays,
-                ["blockedCategories"] = BlockedCategories ?? new List<string>(),
-                ["favorites"] = (Favorites ?? new List<FavoriteEntryDto>()).Select(f => f.ToJsonDictionary()).ToList()
+                ["blockedCategories"] = BlockedCategories ?? new List<string>()
             };
         }
 
-        public static SettingsAndFavoritesDto FromJsonDictionary(Dictionary<string, object> dict)
+        public static SettingsDto FromJsonDictionary(Dictionary<string, object> dict)
         {
-            var dto = new SettingsAndFavoritesDto
+            var dto = new SettingsDto
             {
                 ProjectId = SimpleJson.GetString(dict, "projectId"),
                 SettingsRevision = SimpleJson.GetLong(dict, "settingsRevision", 1),
-                Mode = SimpleJson.GetString(dict, "mode", "History"),
                 Language = SimpleJson.GetString(dict, "language", "ja"),
-                MaxNavigationHistory = SimpleJson.GetInt(dict, "maxNavigationHistory", 50),
                 MaxRotationHistory = SimpleJson.GetInt(dict, "maxRotationHistory", 20),
                 RecordSceneObjects = SimpleJson.GetBool(dict, "recordSceneObjects", true),
                 RecordAssets = SimpleJson.GetBool(dict, "recordAssets", true),
-                AutoFocusUpdatedInspector = SimpleJson.GetBool(dict, "autoFocusUpdatedInspector", false),
-                AutoCleanupMissingFavorites = SimpleJson.GetBool(dict, "autoCleanupMissingFavorites", false),
                 ShowInspectorOverlays = SimpleJson.GetBool(dict, "showInspectorOverlays", true),
-                BlockedCategories = new List<string>(),
-                Favorites = new List<FavoriteEntryDto>()
+                BlockedCategories = new List<string>()
             };
 
             var cats = SimpleJson.GetList(dict, "blockedCategories");
@@ -181,64 +102,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 }
             }
 
-            var favs = SimpleJson.GetList(dict, "favorites");
-            if (favs != null)
-            {
-                for (int i = 0; i < favs.Count; i++)
-                {
-                    if (favs[i] is Dictionary<string, object> fd)
-                    {
-                        dto.Favorites.Add(FavoriteEntryDto.FromJsonDictionary(fd));
-                    }
-                }
-            }
-
             return dto;
-        }
-    }
-
-    public sealed class FavoriteEntryDto
-    {
-        public string FavoriteId { get; set; } = string.Empty;
-        public string Kind { get; set; } = "None";
-        public string AssetGuid { get; set; } = string.Empty;
-        public long LocalFileId { get; set; }
-        public string GlobalObjectIdString { get; set; } = string.Empty;
-        public string SceneGuid { get; set; } = string.Empty;
-        public string DisplayNameCache { get; set; } = string.Empty;
-        public string TypeNameCache { get; set; } = string.Empty;
-        public int SortOrder { get; set; }
-
-        public Dictionary<string, object> ToJsonDictionary()
-        {
-            return new Dictionary<string, object>
-            {
-                ["favoriteId"] = FavoriteId ?? string.Empty,
-                ["kind"] = Kind ?? "None",
-                ["assetGuid"] = AssetGuid ?? string.Empty,
-                ["localFileId"] = LocalFileId,
-                ["globalObjectIdString"] = GlobalObjectIdString ?? string.Empty,
-                ["sceneGuid"] = SceneGuid ?? string.Empty,
-                ["displayNameCache"] = DisplayNameCache ?? string.Empty,
-                ["typeNameCache"] = TypeNameCache ?? string.Empty,
-                ["sortOrder"] = SortOrder
-            };
-        }
-
-        public static FavoriteEntryDto FromJsonDictionary(Dictionary<string, object> dict)
-        {
-            return new FavoriteEntryDto
-            {
-                FavoriteId = SimpleJson.GetString(dict, "favoriteId"),
-                Kind = SimpleJson.GetString(dict, "kind", "None"),
-                AssetGuid = SimpleJson.GetString(dict, "assetGuid"),
-                LocalFileId = SimpleJson.GetLong(dict, "localFileId", 0),
-                GlobalObjectIdString = SimpleJson.GetString(dict, "globalObjectIdString"),
-                SceneGuid = SimpleJson.GetString(dict, "sceneGuid"),
-                DisplayNameCache = SimpleJson.GetString(dict, "displayNameCache"),
-                TypeNameCache = SimpleJson.GetString(dict, "typeNameCache"),
-                SortOrder = SimpleJson.GetInt(dict, "sortOrder", 0)
-            };
         }
     }
 

@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using DennokoWorks.InspectorManagerV2.Application;
 using DennokoWorks.InspectorManagerV2.Domain;
@@ -8,15 +7,25 @@ using UnityEngine;
 namespace DennokoWorks.InspectorManagerV2.UnityAdapter
 {
     /// <summary>
-    /// Encapsulates UnityEditor.Selection access and drag-and-drop initiation (Section 5, 7).
+    /// Read-only UnityEditor.Selection snapshot adapter.
+    /// Never mutates global Selection.
     /// </summary>
     public sealed class UnitySelectionAdapter : ISelectionAdapter
     {
-        private readonly UnityObjectResolver _resolver;
-
-        public UnitySelectionAdapter(UnityObjectResolver resolver)
+        public static ObjectItemSnapshot CreateItemSnapshot(UnityEngine.Object obj)
         {
-            _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
+            if (obj == null) return null;
+
+            var key = UnityObjectIdHelper.GetObjectRefKey(obj);
+            if (!key.IsValid) return null;
+
+            var (category, isAsset) = UnityCategoryClassifier.Classify(obj);
+            return new ObjectItemSnapshot(
+                key,
+                SafeGetName(obj),
+                obj.GetType().Name,
+                category,
+                isAsset);
         }
 
         public SelectionSnapshot CaptureCurrentSelection(long sequence, long generation, SelectionSource source)
@@ -38,7 +47,7 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                 {
                     var obj = rawObjects[i];
                     if (obj == null) continue;
-                    var item = _resolver.CreateItemSnapshot(obj);
+                    var item = CreateItemSnapshot(obj);
                     if (item != null && seen.Add(item.Key))
                     {
                         items.Add(item);
@@ -49,7 +58,7 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
             ObjectRefKey? activeKey = null;
             if (activeObj != null)
             {
-                var activeItem = _resolver.CreateItemSnapshot(activeObj);
+                var activeItem = CreateItemSnapshot(activeObj);
                 if (activeItem != null)
                 {
                     activeKey = activeItem.Key;
@@ -66,51 +75,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
             }
 
             return new SelectionSnapshot(items, activeKey, sequence, generation, source);
-        }
-
-        public bool TrySetGlobalSelection(IReadOnlyList<ObjectRefKey> targets, ObjectRefKey? activeTarget, out string error)
-        {
-            error = string.Empty;
-            if (targets == null || targets.Count == 0)
-            {
-                error = "Target selection is empty.";
-                return false;
-            }
-
-            // Section 7: Resolve ALL targets first; never shrink partial multi-selection!
-            var resolved = new UnityEngine.Object[targets.Count];
-            UnityEngine.Object activeObj = null;
-
-            for (int i = 0; i < targets.Count; i++)
-            {
-                var obj = UnityObjectIdHelper.ResolveObject(targets[i]);
-                if (obj == null)
-                {
-                    error = "One or more target objects could not be resolved.";
-                    return false;
-                }
-
-                resolved[i] = obj;
-                if (activeTarget.HasValue && targets[i] == activeTarget.Value)
-                {
-                    activeObj = obj;
-                }
-            }
-
-            try
-            {
-                Selection.objects = resolved;
-                if (activeObj != null)
-                {
-                    Selection.activeObject = activeObj;
-                }
-                return true;
-            }
-            catch (Exception ex)
-            {
-                error = ex.Message;
-                return false;
-            }
         }
 
         public bool AreAllTargetsAlive(IReadOnlyList<ObjectRefKey> targets)
@@ -130,45 +94,16 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
             return true;
         }
 
-        public bool IsTargetAlive(ObjectRefKey key)
+        private static string SafeGetName(UnityEngine.Object obj)
         {
-            return UnityObjectIdHelper.ResolveObject(key) != null;
-        }
-
-        public bool PingObject(ObjectRefKey key)
-        {
-            var obj = UnityObjectIdHelper.ResolveObject(key);
-            if (obj == null) return false;
-            EditorGUIUtility.PingObject(obj);
-            return true;
-        }
-
-        public bool TryStartDrag(IReadOnlyList<ObjectRefKey> targets, string title, out string error)
-        {
-            error = string.Empty;
-            if (targets == null || targets.Count == 0)
+            try
             {
-                error = "No objects to drag.";
-                return false;
+                return string.IsNullOrEmpty(obj.name) ? "(" + obj.GetType().Name + ")" : obj.name;
             }
-
-            // Section 7: Resolve ALL references before starting drag; abort if any missing!
-            var resolved = new UnityEngine.Object[targets.Count];
-            for (int i = 0; i < targets.Count; i++)
+            catch
             {
-                var obj = UnityObjectIdHelper.ResolveObject(targets[i]);
-                if (obj == null)
-                {
-                    error = "Cannot start drag: one or more objects no longer exist.";
-                    return false;
-                }
-                resolved[i] = obj;
+                return "(Unnamed)";
             }
-
-            DragAndDrop.PrepareStartDrag();
-            DragAndDrop.objectReferences = resolved;
-            DragAndDrop.StartDrag(string.IsNullOrEmpty(title) ? resolved[0].name : title);
-            return true;
         }
     }
 }

@@ -99,16 +99,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         }
     }
 
-    public sealed class PauseRequestedEvent : DomainEvent
-    {
-        public PauseRequestedEvent(string opId, long gen) : base(opId, gen) { }
-    }
-
-    public sealed class ResumeRequestedEvent : DomainEvent
-    {
-        public ResumeRequestedEvent(string opId, long gen) : base(opId, gen) { }
-    }
-
     public sealed class StopSessionRequestedEvent : DomainEvent
     {
         public StopReason Reason { get; }
@@ -163,34 +153,10 @@ namespace DennokoWorks.InspectorManagerV2.Domain
     public sealed class SelectionReceivedEvent : DomainEvent
     {
         public SelectionSnapshot Snapshot { get; }
-        public long NowMs { get; }
 
-        public SelectionReceivedEvent(string opId, long gen, SelectionSnapshot snapshot, long nowMs) : base(opId, gen)
+        public SelectionReceivedEvent(string opId, long gen, SelectionSnapshot snapshot) : base(opId, gen)
         {
             Snapshot = snapshot ?? SelectionSnapshot.Empty;
-            NowMs = nowMs;
-        }
-    }
-
-    public sealed class NavigationMoveRequestedEvent : DomainEvent
-    {
-        public int TargetIndex { get; }
-        public long ExpiresAtMs { get; }
-
-        public NavigationMoveRequestedEvent(string opId, long gen, int targetIndex, long expiresAtMs) : base(opId, gen)
-        {
-            TargetIndex = targetIndex;
-            ExpiresAtMs = expiresAtMs;
-        }
-    }
-
-    public sealed class NavigationNotificationExpiredEvent : DomainEvent
-    {
-        public SelectionSnapshot ObservedSelection { get; }
-
-        public NavigationNotificationExpiredEvent(string opId, long gen, SelectionSnapshot observedSelection) : base(opId, gen)
-        {
-            ObservedSelection = observedSelection ?? SelectionSnapshot.Empty;
         }
     }
 
@@ -249,19 +215,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             WindowKey = windowKey;
             NewLocked = newLocked;
             UpdatedLease = updatedLease;
-        }
-    }
-
-    public sealed class BulkManualLockChangedEvent : DomainEvent
-    {
-        public bool NewLocked { get; }
-        public IReadOnlyList<WindowKey> AffectedWindows { get; }
-
-        public BulkManualLockChangedEvent(string opId, long gen, bool newLocked, IReadOnlyList<WindowKey> affectedWindows)
-            : base(opId, gen)
-        {
-            NewLocked = newLocked;
-            AffectedWindows = affectedWindows ?? Array.Empty<WindowKey>();
         }
     }
 
@@ -336,21 +289,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         }
     }
 
-    public sealed class FavoritesUpdatedEvent : DomainEvent
-    {
-        public IReadOnlyList<FavoriteEntry> Favorites { get; }
-
-        public FavoritesUpdatedEvent(string opId, long gen, IReadOnlyList<FavoriteEntry> favorites) : base(opId, gen)
-        {
-            Favorites = favorites ?? Array.Empty<FavoriteEntry>();
-        }
-    }
-
-    public sealed class ClearNavigationHistoryEvent : DomainEvent
-    {
-        public ClearNavigationHistoryEvent(string opId, long gen) : base(opId, gen) { }
-    }
-
     public sealed class ResetLayoutEvent : DomainEvent
     {
         public ResetLayoutEvent(string opId, long gen) : base(opId, gen) { }
@@ -388,12 +326,10 @@ namespace DennokoWorks.InspectorManagerV2.Domain
     public sealed class RequestEvaluateCurrentSelectionEffect : ReducerEffect
     {
         public SelectionSnapshot Snapshot { get; }
-        public bool IsNavigationUpdate { get; }
 
-        public RequestEvaluateCurrentSelectionEffect(SelectionSnapshot snapshot, bool isNavigationUpdate)
+        public RequestEvaluateCurrentSelectionEffect(SelectionSnapshot snapshot)
         {
             Snapshot = snapshot;
-            IsNavigationUpdate = isNavigationUpdate;
         }
     }
 
@@ -404,18 +340,6 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         public RequestReassignHistoryEffect(bool seedFromObservedIfEmpty)
         {
             SeedFromObservedIfEmpty = seedFromObservedIfEmpty;
-        }
-    }
-
-    public sealed class RequestSetGlobalSelectionEffect : ReducerEffect
-    {
-        public SelectionSnapshot TargetSnapshot { get; }
-        public string OperationId { get; }
-
-        public RequestSetGlobalSelectionEffect(SelectionSnapshot targetSnapshot, string operationId)
-        {
-            TargetSnapshot = targetSnapshot;
-            OperationId = operationId;
         }
     }
 

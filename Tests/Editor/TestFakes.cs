@@ -14,13 +14,10 @@ namespace DennokoWorks.InspectorManagerV2.Tests
 
     internal sealed class FakeLogger : IDiagnosticLogger
     {
-        private readonly List<DiagnosticLogEntry> _entries = new List<DiagnosticLogEntry>();
-        public void Info(string operationId, long generation, WindowKey? windowKey, string stage, string message)
-            => _entries.Add(new DiagnosticLogEntry(0, operationId, generation, windowKey, stage, message, false));
+        public List<string> Errors { get; } = new List<string>();
+        public void Info(string operationId, long generation, WindowKey? windowKey, string stage, string message) { }
         public void Error(string operationId, long generation, WindowKey? windowKey, string stage, string message)
-            => _entries.Add(new DiagnosticLogEntry(0, operationId, generation, windowKey, stage, message, true));
-        public IReadOnlyList<DiagnosticLogEntry> GetRecentEntries() => _entries.ToArray();
-        public void Clear() => _entries.Clear();
+            => Errors.Add(stage + ": " + message);
     }
 
     internal sealed class FakeSessionLayoutStore : ISessionLayoutStore
@@ -39,28 +36,28 @@ namespace DennokoWorks.InspectorManagerV2.Tests
         public bool IsWriteBlockedByNewerSchema { get; set; }
         public bool FailJournalSaves { get; set; }
         public bool FailSettingsSaves { get; set; }
-        public SettingsAndFavoritesDto StoredSettings { get; set; } = new SettingsAndFavoritesDto();
+        public SettingsDto StoredSettings { get; set; } = new SettingsDto();
         public RecoveryJournalDto StoredJournal { get; set; }
         public int JournalSaveCount { get; private set; }
         public int SettingsFlushCount { get; private set; }
 
-        public LoadResult<SettingsAndFavoritesDto> LoadSettingsAndFavorites()
+        public LoadResult<SettingsDto> LoadSettings()
         {
             if (IsWriteBlockedByNewerSchema)
             {
-                return new LoadResult<SettingsAndFavoritesDto>(false, new SettingsAndFavoritesDto(), fellBackToDefault: true, newerSchemaDetected: true, notice: "Newer schema");
+                return new LoadResult<SettingsDto>(false, new SettingsDto(), fellBackToDefault: true, newerSchemaDetected: true, notice: "Newer schema");
             }
-            return new LoadResult<SettingsAndFavoritesDto>(true, StoredSettings ?? new SettingsAndFavoritesDto());
+            return new LoadResult<SettingsDto>(true, StoredSettings ?? new SettingsDto());
         }
 
-        public SaveResult QueueSaveSettingsAndFavorites(SettingsAndFavoritesDto dto, long revision)
+        public SaveResult QueueSaveSettings(SettingsDto dto, long revision)
         {
             if (IsWriteBlockedByNewerSchema) return new SaveResult(false, true, "Blocked");
             StoredSettings = dto;
             return SaveResult.Ok();
         }
 
-        public SaveResult FlushSettingsAndFavorites()
+        public SaveResult FlushSettings()
         {
             if (IsWriteBlockedByNewerSchema) return new SaveResult(false, true, "Blocked");
             if (FailSettingsSaves) return SaveResult.Fail("Read-only filesystem");
@@ -111,7 +108,6 @@ namespace DennokoWorks.InspectorManagerV2.Tests
         public FakeSelectionAdapter SelectionBacking { get; set; }
         public WindowKey? FocusedKey { get; set; }
         public WindowKey? HoveredKey { get; set; }
-        public bool ContinuousSelection { get; set; }
         public int NextCreatedId = 100;
         public int FocusCallCount { get; private set; }
 
@@ -137,7 +133,7 @@ namespace DennokoWorks.InspectorManagerV2.Tests
         {
             return Windows.Where(w => w.IsAlive).Select(w => new ObservedWindowSnapshot(
                 w.Key,
-                w.IsLocked,
+                !w.FailRead && w.IsLocked,
                 w.LockedTargets.Count > 0 ? w.LockedTargets[0].Value : string.Empty,
                 w.IdentityEvidence,
                 BuildSelectionFromKeys(w.LockedTargets, w.ActiveTarget),
@@ -245,9 +241,10 @@ namespace DennokoWorks.InspectorManagerV2.Tests
             return AdapterResult.Ok();
         }
 
-        public WindowKey? GetFocusedInspectorKey() => FocusedKey;
-        public bool IsUserInteractingWithInspector(WindowKey key) => FocusedKey == key || HoveredKey == key;
-        public bool IsSelectionSourceContinuous() => ContinuousSelection;
+        public bool IsUserInteractingWithInspector(WindowKey key)
+            => (FocusedKey.HasValue && FocusedKey.Value == key)
+            || (HoveredKey.HasValue && HoveredKey.Value == key);
+
         public void FocusInspector(WindowKey key) => FocusCallCount++;
         public void InvalidateCache() { }
 
@@ -256,7 +253,7 @@ namespace DennokoWorks.InspectorManagerV2.Tests
             if (keys == null || keys.Count == 0) return SelectionSnapshot.Empty;
             var items = keys.Select(k => SelectionBacking != null && SelectionBacking.Objects.TryGetValue(k, out var item)
                 ? item
-                : new ObjectItemSnapshot(k, k.Value, "GameObject", ObjectCategory.GameObject, false, PersistentObjectId.Empty)).ToArray();
+                : new ObjectItemSnapshot(k, k.Value, "GameObject", ObjectCategory.GameObject, false)).ToArray();
             return new SelectionSnapshot(items, active ?? items[0].Key, 0, 0, SelectionSource.RecoveryObservation);
         }
     }
@@ -265,19 +262,11 @@ namespace DennokoWorks.InspectorManagerV2.Tests
     {
         public Dictionary<ObjectRefKey, ObjectItemSnapshot> Objects { get; } = new Dictionary<ObjectRefKey, ObjectItemSnapshot>();
         public SelectionSnapshot CurrentSelection { get; set; } = SelectionSnapshot.Empty;
-        public bool EmitSelectionChangedOnSet { get; set; } = true;
-        public Action OnGlobalSelectionChanged;
-        public int SetGlobalSelectionCallCount { get; private set; }
 
         public ObjectItemSnapshot RegisterObject(string id, string name = null, ObjectCategory category = ObjectCategory.GameObject, bool isAsset = false)
         {
             var key = new ObjectRefKey(id);
-            var item = new ObjectItemSnapshot(key, name ?? id, category.ToString(), category, isAsset, new PersistentObjectId(
-                isAsset ? PersistentObjectKind.Asset : PersistentObjectKind.SceneObject,
-                isAsset ? "guid-" + id : string.Empty,
-                isAsset ? 100 : 0,
-                "gid-" + id,
-                isAsset ? string.Empty : "scene-1"));
+            var item = new ObjectItemSnapshot(key, name ?? id, category.ToString(), category, isAsset);
             Objects[key] = item;
             return item;
         }
@@ -291,75 +280,13 @@ namespace DennokoWorks.InspectorManagerV2.Tests
             return new SelectionSnapshot(items, items[0].Key, 0, 0, SelectionSource.UserSelection);
         }
 
-        public SelectionSnapshot BuildSnapshotWithActive(string activeId, params string[] ids)
-        {
-            var items = ids.Select(id => Objects[new ObjectRefKey(id)]).ToArray();
-            return new SelectionSnapshot(items, new ObjectRefKey(activeId), 0, 0, SelectionSource.UserSelection);
-        }
-
         public SelectionSnapshot CaptureCurrentSelection(long sequence, long generation, SelectionSource source)
         {
             if (CurrentSelection == null || CurrentSelection.IsEmpty) return SelectionSnapshot.Empty;
             return new SelectionSnapshot(CurrentSelection.OrderedTargets, CurrentSelection.ActiveTarget, sequence, generation, source);
         }
 
-        public bool TrySetGlobalSelection(IReadOnlyList<ObjectRefKey> targets, ObjectRefKey? activeTarget, out string error)
-        {
-            error = string.Empty;
-            if (!AreAllTargetsAlive(targets))
-            {
-                error = "Missing object";
-                return false;
-            }
-            SetGlobalSelectionCallCount++;
-            var items = targets.Select(k => Objects[k]).ToArray();
-            CurrentSelection = new SelectionSnapshot(items, activeTarget ?? items[0].Key, 0, 0, SelectionSource.UserSelection);
-            if (EmitSelectionChangedOnSet)
-            {
-                OnGlobalSelectionChanged?.Invoke();
-            }
-            return true;
-        }
-
         public bool AreAllTargetsAlive(IReadOnlyList<ObjectRefKey> targets)
             => targets != null && targets.Count > 0 && targets.All(k => Objects.ContainsKey(k));
-
-        public bool IsTargetAlive(ObjectRefKey key) => Objects.ContainsKey(key);
-        public bool PingObject(ObjectRefKey key) => Objects.ContainsKey(key);
-        public bool TryStartDrag(IReadOnlyList<ObjectRefKey> targets, string title, out string error)
-        {
-            error = AreAllTargetsAlive(targets) ? string.Empty : "Missing target";
-            return string.IsNullOrEmpty(error);
-        }
-    }
-
-    internal sealed class FakeFavoriteResolver : IFavoriteResolver
-    {
-        private readonly FakeSelectionAdapter _selection;
-        public Dictionary<string, FavoriteResolutionState> OverrideStates { get; } = new Dictionary<string, FavoriteResolutionState>();
-
-        public FakeFavoriteResolver(FakeSelectionAdapter selection) => _selection = selection;
-
-        public FavoriteResolutionResult Resolve(FavoriteEntry entry)
-        {
-            if (OverrideStates.TryGetValue(entry.FavoriteId, out var st))
-            {
-                return new FavoriteResolutionResult(st, null, null, entry.DisplayNameCache, entry.TypeNameCache, st.ToString());
-            }
-            var match = _selection.Objects.Values.FirstOrDefault(o => o.PersistentId == entry.PersistentId);
-            if (match != null)
-            {
-                return new FavoriteResolutionResult(FavoriteResolutionState.Resolved, match.Key, null, match.DisplayName, match.TypeName, "Resolved");
-            }
-            return new FavoriteResolutionResult(FavoriteResolutionState.DeletedOrMissing, null, null, entry.DisplayNameCache, entry.TypeNameCache, "Missing");
-        }
-
-        public FavoriteEntry CreateFromLiveObject(ObjectRefKey key, int sortOrder)
-        {
-            if (!_selection.Objects.TryGetValue(key, out var item)) return null;
-            return new FavoriteEntry(Guid.NewGuid().ToString("N"), item.PersistentId, item.DisplayName, item.TypeName, sortOrder, false, null, FavoriteResolutionState.Resolved, "Resolved");
-        }
-
-        public void InvalidateCache() { }
     }
 }

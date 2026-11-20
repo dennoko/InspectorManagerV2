@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using DennokoWorks.InspectorManagerV2.Application;
 using DennokoWorks.InspectorManagerV2.Domain;
@@ -11,49 +10,40 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
 {
     /// <summary>
     /// Capability-probed Unity Inspector reflection adapter supporting Unity 2022.3.22f1 AND Unity 6 (6000.x).
-    /// All reflection lookup occurs ONCE at initialization (Section 8.1 & 14.1).
+    /// All reflection lookup occurs ONCE at initialization.
     /// Startup probe is strictly read-only and never mutates existing Inspector windows.
     /// </summary>
     public sealed class InspectorReflectionAdapter : IInspectorAdapter
     {
-        private readonly UnityObjectResolver _resolver;
         private readonly string _editorSessionId;
 
-        // Cached reflection metadata (discovered once)
         private Type _inspectorWindowType;
         private Type _propertyEditorType;
 
-        // Enumeration
         private MethodInfo _getAllInspectorWindowsMethod;
         private MethodInfo _getInspectorsMethod;
 
-        // Tracker (prefer PropertyEditor.tracker property over m_Tracker field per Section 14.1!)
         private PropertyInfo _trackerProperty;
         private FieldInfo _trackerField;
 
-        // Lock read/write (supports both InspectorWindow.isLocked AND Unity 6 m_LockTracker / EditorLockTracker!)
         private PropertyInfo _inspectorIsLockedProperty;
         private FieldInfo _lockTrackerField;
         private PropertyInfo _lockTrackerIsLockedProperty;
         private MethodInfo _lockTrackerFlipLockedMethod;
 
-        // Targets read/write (prefer combined InspectorWindow.SetObjectsLocked/GetObjectsLocked over tracker fallback!)
         private MethodInfo _windowGetObjectsLockedMethod;
         private MethodInfo _windowSetObjectsLockedMethod;
         private MethodInfo _trackerGetObjectsLockedMethod;
         private MethodInfo _trackerSetObjectsLockedMethod;
 
-        // Rebuild / Flush (static FlushAllOptimizedGUIBlocksIfNeeded per Section 14.1!)
         private MethodInfo _rebuildContentsContainersMethod;
         private MethodInfo _flushAllOptimizedGuiBlocksStaticMethod;
 
-        // Window enumeration cache
         private EditorWindow[] _cachedWindows;
         private AdapterCapabilities _cachedCapabilities;
 
-        public InspectorReflectionAdapter(UnityObjectResolver resolver, string editorSessionId)
+        public InspectorReflectionAdapter(string editorSessionId)
         {
-            _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
             _editorSessionId = editorSessionId ?? string.Empty;
             DiscoverInternalApisOnce();
         }
@@ -102,12 +92,8 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                 canCreateWindow: canCreate,
                 canCloseWindow: canClose,
                 usesWindowCombinedTargetLockApi: usesCombinedWindowApi,
-                // Section 14.1: SetObjectsLocked takes a List<Object> and does not guarantee independent active-target readback.
                 supportsActiveTargetSelection: false,
-                // Section 14.1: Empty display compensation is achieved cleanly by unlocking back to ObservedLocked=false (or writing empty locked list).
                 supportsEmptyTargetCompensation: canWriteLock,
-                // Section 6.1: Standard padlock click origin is not distinguishable reliably from tracker rebuild lock drops.
-                canDistinguishStandardUiManualUnlock: false,
                 diagnosticSummary: string.Join("; ", summaryParts));
 
             return _cachedCapabilities;
@@ -138,7 +124,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                 return Array.Empty<ObservedWindowSnapshot>();
             }
 
-            // Section 14.3: Always return an immutable snapshot list, never a borrowed mutable buffer.
             var snapshots = new List<ObservedWindowSnapshot>(windows.Length);
             for (int i = 0; i < windows.Length; i++)
             {
@@ -222,7 +207,7 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
             {
                 var obj = lockedObjects[i];
                 if (obj == null) continue;
-                var item = _resolver.CreateItemSnapshot(obj);
+                var item = UnitySelectionAdapter.CreateItemSnapshot(obj);
                 if (item != null)
                 {
                     items.Add(item);
@@ -286,7 +271,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                 return WriteLockOnly(key, locked);
             }
 
-            // Resolve ALL target objects without shrinking multi-selection.
             var resolvedList = new List<UnityEngine.Object>(targets.Count);
             for (int i = 0; i < targets.Count; i++)
             {
@@ -298,14 +282,12 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                 resolvedList.Add(obj);
             }
 
-            // Ensure tracker exists via PropertyEditor.tracker property (Section 14.1: prevents first-update failure on fresh Inspectors).
             var tracker = TryGetTracker(win, ensureCreated: true);
 
             try
             {
                 if (_windowSetObjectsLockedMethod != null)
                 {
-                    // Preferred combined window API (Section 14.1): sets targets and lock together.
                     _windowSetObjectsLockedMethod.Invoke(win, new object[] { resolvedList });
                     if (locked && TryReadLocked(win, out bool curLock) && !curLock)
                     {
@@ -319,7 +301,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                         return new AdapterWriteResult(WindowWriteStatus.Failed, false, "ActiveEditorTracker unavailable on Inspector.");
                     }
 
-                    // Tracker fallback path: explicitly set lock alongside targets.
                     TryWriteLocked(win, locked, out _);
                     _trackerSetObjectsLockedMethod.Invoke(tracker, new object[] { resolvedList });
                     tracker.isLocked = locked;
@@ -329,7 +310,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                     return new AdapterWriteResult(WindowWriteStatus.Failed, false, "No compatible SetObjectsLocked API available.");
                 }
 
-                // Rebuild & flush sequence (Section 14.1).
                 if (tracker != null)
                 {
                     tracker.ForceRebuild();
@@ -350,15 +330,12 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                 FlushOptimizedGuiBlocksSafe();
                 win.Repaint();
 
-                // Immediate read-back verification.
                 var verify = VerifyTargetsAndLock(key, targets, locked);
                 if (verify.Status == WindowWriteStatus.Verified)
                 {
                     return new AdapterWriteResult(WindowWriteStatus.Verified, verify.ObservedLocked);
                 }
 
-                // Section 14.1: If write succeeded without exception but read-back is still settling (e.g. hidden tab),
-                // report PresentationPending so the coordinator verifies on the next Editor update tick with timeout.
                 return new AdapterWriteResult(WindowWriteStatus.PresentationPending, verify.ObservedLocked, verify.Error);
             }
             catch (TargetInvocationException tie)
@@ -444,7 +421,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                 }
 
                 created.Show();
-                // Trigger lazy tracker creation so first update never fails on fresh Inspector (Section 14.5 #1).
                 TryGetTracker(created, ensureCreated: true);
 
                 InvalidateCache();
@@ -494,23 +470,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
             }
         }
 
-        public WindowKey? GetFocusedInspectorKey()
-        {
-            var focused = EditorWindow.focusedWindow;
-            if (focused == null || _inspectorWindowType == null)
-            {
-                return null;
-            }
-
-            if (!_inspectorWindowType.IsInstanceOfType(focused))
-            {
-                return null;
-            }
-
-            var key = UnityObjectIdHelper.GetWindowKey(focused);
-            return key.IsValid ? (WindowKey?)key : null;
-        }
-
         public bool IsUserInteractingWithInspector(WindowKey key)
         {
             if (!key.IsValid || _inspectorWindowType == null)
@@ -526,16 +485,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
 
             var hovered = EditorWindow.mouseOverWindow;
             return hovered != null && _inspectorWindowType.IsInstanceOfType(hovered) && UnityObjectIdHelper.GetWindowKey(hovered) == key;
-        }
-
-        public bool IsSelectionSourceContinuous()
-        {
-            // Section 14.3: Avoid stealing keyboard focus when user is actively navigating Hierarchy or Project browser.
-            var focused = EditorWindow.focusedWindow;
-            if (focused == null) return false;
-            string name = focused.GetType().Name;
-            return string.Equals(name, "SceneHierarchyWindow", StringComparison.Ordinal)
-                || string.Equals(name, "ProjectBrowser", StringComparison.Ordinal);
         }
 
         public void FocusInspector(WindowKey key)
@@ -554,14 +503,12 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                 return null;
             }
 
-            // Fast lookup via UnityObjectIdHelper first.
             var resolved = UnityObjectIdHelper.ResolveWindow(key);
             if (resolved != null && _inspectorWindowType.IsInstanceOfType(resolved))
             {
                 return resolved;
             }
 
-            // Fallback scan of live Inspector windows.
             var windows = _cachedWindows ?? EnumerateRawInspectorWindows();
             for (int i = 0; i < windows.Length; i++)
             {
@@ -604,7 +551,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                     _inspectorIsLockedProperty = isLockedProp;
                 }
 
-                // Unity 2023.2 / Unity 6 EditorLockTracker support
                 var lockTrackerField = _inspectorWindowType.GetField("m_LockTracker", anyInstance);
                 if (lockTrackerField != null)
                 {
@@ -631,7 +577,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                     _windowSetObjectsLockedMethod = setLocked;
                 }
 
-                // Section 14.1: FlushAllOptimizedGUIBlocksIfNeeded is STATIC!
                 var flushStatic = _inspectorWindowType.GetMethod("FlushAllOptimizedGUIBlocksIfNeeded", anyStatic, null, Type.EmptyTypes, null);
                 if (flushStatic != null && flushStatic.ReturnType == typeof(void))
                 {
@@ -639,7 +584,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                 }
             }
 
-            // PropertyEditor base class (or InspectorWindow directly)
             Type trackerOwner = _propertyEditorType ?? _inspectorWindowType;
             if (trackerOwner != null)
             {
@@ -662,7 +606,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                 }
             }
 
-            // ActiveEditorTracker target methods
             var trackerType = typeof(ActiveEditorTracker);
             var objListType = typeof(List<UnityEngine.Object>);
             var tGetLocked = trackerType.GetMethod("GetObjectsLockedByThisTracker", anyInstance, null, new[] { objListType }, null);
@@ -747,7 +690,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
             if (win == null) return null;
             try
             {
-                // Prefer PropertyEditor.tracker property (creates tracker lazily if ensureCreated)
                 if (ensureCreated && _trackerProperty != null)
                 {
                     return _trackerProperty.GetValue(win, null) as ActiveEditorTracker;
@@ -908,7 +850,6 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
 
         private string ReadRepresentativeName(EditorWindow win)
         {
-            // Section 14.1: activeEditors is ONLY used for UI representative display name, NEVER for exact target set readback!
             try
             {
                 var tracker = TryGetTracker(win, ensureCreated: false);
