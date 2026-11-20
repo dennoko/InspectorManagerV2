@@ -1,0 +1,21 @@
+{
+    "name": "InspectorManagerV2.Composition",
+    "rootNamespace": "DennokoWorks.InspectorManagerV2.Composition",
+    "references": [
+        "InspectorManagerV2.Domain",
+        "InspectorManagerV2.Application",
+        "InspectorManagerV2.UnityAdapter",
+        "InspectorManagerV2.Presentation"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

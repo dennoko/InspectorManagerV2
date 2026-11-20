@@ -1,0 +1,19 @@
+{
+    "name": "InspectorManagerV2.UnityAdapter",
+    "rootNamespace": "DennokoWorks.InspectorManagerV2.UnityAdapter",
+    "references": [
+        "InspectorManagerV2.Domain",
+        "InspectorManagerV2.Application"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

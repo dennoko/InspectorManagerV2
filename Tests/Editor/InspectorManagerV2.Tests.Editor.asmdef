@@ -1,0 +1,28 @@
+{
+    "name": "InspectorManagerV2.Tests.Editor",
+    "rootNamespace": "DennokoWorks.InspectorManagerV2.Tests",
+    "references": [
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner",
+        "InspectorManagerV2.Domain",
+        "InspectorManagerV2.Application",
+        "InspectorManagerV2.UnityAdapter",
+        "InspectorManagerV2.Presentation",
+        "InspectorManagerV2.Composition"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
