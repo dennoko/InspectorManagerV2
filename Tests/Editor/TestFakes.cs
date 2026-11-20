@@ -110,6 +110,7 @@ namespace DennokoWorks.InspectorManagerV2.Tests
         public List<FakeWindowInstance> Windows { get; } = new List<FakeWindowInstance>();
         public FakeSelectionAdapter SelectionBacking { get; set; }
         public WindowKey? FocusedKey { get; set; }
+        public WindowKey? HoveredKey { get; set; }
         public bool ContinuousSelection { get; set; }
         public int NextCreatedId = 100;
         public int FocusCallCount { get; private set; }
@@ -139,7 +140,8 @@ namespace DennokoWorks.InspectorManagerV2.Tests
                 w.IsLocked,
                 w.LockedTargets.Count > 0 ? w.LockedTargets[0].Value : string.Empty,
                 w.IdentityEvidence,
-                BuildSelectionFromKeys(w.LockedTargets, w.ActiveTarget))).ToArray();
+                BuildSelectionFromKeys(w.LockedTargets, w.ActiveTarget),
+                isLockReadable: !w.FailRead)).ToArray();
         }
 
         public bool IsWindowAlive(WindowKey key, string expectedIdentityEvidence = null)
@@ -244,6 +246,7 @@ namespace DennokoWorks.InspectorManagerV2.Tests
         }
 
         public WindowKey? GetFocusedInspectorKey() => FocusedKey;
+        public bool IsUserInteractingWithInspector(WindowKey key) => FocusedKey == key || HoveredKey == key;
         public bool IsSelectionSourceContinuous() => ContinuousSelection;
         public void FocusInspector(WindowKey key) => FocusCallCount++;
         public void InvalidateCache() { }

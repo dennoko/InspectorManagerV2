@@ -149,14 +149,16 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
                 if (!key.IsValid) continue;
 
                 string evidence = UnityObjectIdHelper.BuildWindowIdentityEvidence(_editorSessionId, win);
-                bool locked = TryReadLocked(win, out bool readLocked) && readLocked;
+                bool lockReadable = TryReadLocked(win, out bool readLocked);
+                bool locked = lockReadable && readLocked;
                 string repName = ReadRepresentativeName(win);
 
                 snapshots.Add(new ObservedWindowSnapshot(
                     key,
                     locked,
                     repName,
-                    evidence));
+                    evidence,
+                    isLockReadable: lockReadable));
             }
 
             return snapshots;
@@ -507,6 +509,23 @@ namespace DennokoWorks.InspectorManagerV2.UnityAdapter
 
             var key = UnityObjectIdHelper.GetWindowKey(focused);
             return key.IsValid ? (WindowKey?)key : null;
+        }
+
+        public bool IsUserInteractingWithInspector(WindowKey key)
+        {
+            if (!key.IsValid || _inspectorWindowType == null)
+            {
+                return false;
+            }
+
+            var focused = EditorWindow.focusedWindow;
+            if (focused != null && _inspectorWindowType.IsInstanceOfType(focused) && UnityObjectIdHelper.GetWindowKey(focused) == key)
+            {
+                return true;
+            }
+
+            var hovered = EditorWindow.mouseOverWindow;
+            return hovered != null && _inspectorWindowType.IsInstanceOfType(hovered) && UnityObjectIdHelper.GetWindowKey(hovered) == key;
         }
 
         public bool IsSelectionSourceContinuous()

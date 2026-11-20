@@ -238,8 +238,15 @@ namespace DennokoWorks.InspectorManagerV2.Domain
                     statusNotice: "Rotation unavailable."));
             }
 
+            // Manual unlock (Section 6.1: "session-scoped") and fault isolation belong to the previous management session.
+            // Clear them so a new session does not lock these windows while never assigning to them.
+            var freshWindows = state.Windows.Select(w => w.IsManuallyUnlocked || w.IsFaultIsolated
+                ? w.With(isManuallyUnlocked: false, isFaultIsolated: false, faultReason: string.Empty)
+                : w).ToArray();
+
             return new ReduceResult(state.With(
                 lifecycleState: RuntimeLifecycleState.Starting,
+                windows: freshWindows,
                 generation: state.Generation + 1,
                 lastError: string.Empty,
                 statusNotice: "Starting rotation...",

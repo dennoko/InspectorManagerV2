@@ -1105,10 +1105,12 @@ namespace DennokoWorks.InspectorManagerV2.Application
             LockLease lease = null;
             bool finalLocked = read.ObservedLocked;
 
-            // Section 6.1: Explicit exclusion locks the Inspector to freeze its display, acquiring a lease if active.
-            if (excluded)
+            // Section 6.1: Explicit exclusion locks the Inspector to freeze its display under a lease.
+            // While Off there is no lease to restore from, so only the flag is recorded; Start locks excluded windows
+            // under a lease (Step 3). Writing a lock here would leak into the next session's OriginalLocked.
+            if (excluded && isSessionActive)
             {
-                if (isSessionActive && !_state.Leases.ContainsKey(key))
+                if (!_state.Leases.ContainsKey(key))
                 {
                     lease = new LockLease(
                         Guid.NewGuid().ToString("N"),
@@ -1487,8 +1489,14 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 _reloadGraceUntilMs = -1;
             }
 
-            // Detect unknown lock drops on participating windows BEFORE standard sync overwrites state (Section 6.1 & 14.5 #2).
+            // Detect lock changes made outside Manager commands BEFORE standard sync overwrites state (Section 6.1 & 14.5 #2).
+            // - Unlock of a participating window while the user is interacting with that Inspector (focused / hovered)
+            //   is treated as a manual unlock via the standard padlock UI: the window leaves rotation and is NOT re-locked.
+            // - Unlock without such evidence is treated as an unknown drop (e.g. tracker rebuild) and recovered.
+            // - Re-lock of a manually unlocked window (e.g. via the standard padlock) returns it to rotation.
             var unknownDrops = new List<WindowKey>();
+            var standardUiUnlocks = new List<WindowKey>();
+            var standardUiRelocks = new List<WindowKey>();
             if (_state.LifecycleState == RuntimeLifecycleState.Running || _state.LifecycleState == RuntimeLifecycleState.Paused)
             {
                 var obsMap = new Dictionary<WindowKey, ObservedWindowSnapshot>();
@@ -1497,9 +1505,25 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 for (int i = 0; i < _state.Windows.Count; i++)
                 {
                     var w = _state.Windows[i];
-                    if (w.CanParticipate && obsMap.TryGetValue(w.Key, out var obs) && !obs.ObservedLocked)
+                    if (!obsMap.TryGetValue(w.Key, out var obs) || !obs.IsLockReadable)
                     {
-                        unknownDrops.Add(w.Key);
+                        continue;
+                    }
+
+                    if (w.CanParticipate && !obs.ObservedLocked)
+                    {
+                        if (_inspectorAdapter.IsUserInteractingWithInspector(w.Key))
+                        {
+                            standardUiUnlocks.Add(w.Key);
+                        }
+                        else
+                        {
+                            unknownDrops.Add(w.Key);
+                        }
+                    }
+                    else if (w.IsManaged && w.IsAlive && w.IsManuallyUnlocked && obs.ObservedLocked)
+                    {
+                        standardUiRelocks.Add(w.Key);
                     }
                 }
             }
@@ -1511,6 +1535,18 @@ namespace DennokoWorks.InspectorManagerV2.Application
                 changed = true;
             }
 
+            for (int i = 0; i < standardUiUnlocks.Count; i++)
+            {
+                ApplyStandardUiLockChange(opId, standardUiUnlocks[i], newLocked: false, flashedWindows);
+                changed = true;
+            }
+
+            for (int i = 0; i < standardUiRelocks.Count; i++)
+            {
+                ApplyStandardUiLockChange(opId, standardUiRelocks[i], newLocked: true, flashedWindows);
+                changed = true;
+            }
+
             // Recover unknown lock drops (e.g., tracker recreation) WITHOUT marking them ManuallyUnlocked!
             for (int i = 0; i < unknownDrops.Count; i++)
             {
@@ -1519,6 +1555,30 @@ namespace DennokoWorks.InspectorManagerV2.Application
             }
 
             return changed;
+        }
+
+        /// <summary>
+        /// Applies a lock change the user made through the standard Inspector UI (no Manager command, no tool write).
+        /// Same state transition as a Manager toggle, but nothing is written to the Inspector and the lease is untouched.
+        /// </summary>
+        private void ApplyStandardUiLockChange(string opId, WindowKey key, bool newLocked, HashSet<WindowKey> flashedWindows)
+        {
+            var win = _state.FindWindow(key);
+            if (win == null) return;
+
+            _planExecutor.InvalidateWindowCache(key);
+            _logger.Info(opId, _state.Generation, key, newLocked ? "StandardUiRelock" : "StandardUiUnlock",
+                newLocked
+                    ? "Inspector re-locked outside Manager; returning to rotation."
+                    : "Inspector unlocked while focused/hovered; treating as manual unlock (leaves rotation).");
+
+            ApplyReduceAndRunEffects(new ManualLockChangedEvent(opId, _state.Generation, key, newLocked), flashedWindows);
+            ApplyReduce(new StatusNoticeEvent(
+                opId,
+                _state.Generation,
+                newLocked
+                    ? "Inspector #" + win.FixedDisplayNumber + " was re-locked and rejoined rotation."
+                    : "Inspector #" + win.FixedDisplayNumber + " was unlocked manually and left rotation."));
         }
 
         private void RecoverUnknownLockDrop(WindowKey key, HashSet<WindowKey> flashedWindows)

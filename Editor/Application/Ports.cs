@@ -222,6 +222,13 @@ namespace DennokoWorks.InspectorManagerV2.Application
         AdapterWindowCreateResult CreateInspectorWindow();
         AdapterResult CloseInspectorWindow(WindowKey key, string expectedIdentityEvidence);
         WindowKey? GetFocusedInspectorKey();
+
+        /// <summary>
+        /// True when the given Inspector is currently focused or under the mouse cursor.
+        /// Used as evidence that an observed lock change came from the user via the standard Inspector UI (padlock etc.).
+        /// </summary>
+        bool IsUserInteractingWithInspector(WindowKey key);
+
         bool IsSelectionSourceContinuous();
         void FocusInspector(WindowKey key);
         void InvalidateCache();

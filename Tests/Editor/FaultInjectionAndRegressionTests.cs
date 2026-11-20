@@ -158,6 +158,135 @@ namespace DennokoWorks.InspectorManagerV2.Tests
         }
 
         [Test]
+        public void StandardPadlockUnlock_WhileInspectorFocused_IsManualUnlock_NotRelocked_AndPadlockRelockRejoins()
+        {
+            var (coord, adapter, sel, _, _, clock) = DomainLogicTests.CreateHarness(2, initialLocked: false);
+            sel.RegisterObject("A");
+            coord.EnqueueStartRotation();
+            coord.Tick();
+            DomainLogicTests.SelectAndTick(coord, sel, "A");
+            var key = new WindowKey("w1");
+
+            // User clicks the standard padlock on the focused Inspector #1.
+            adapter.FocusedKey = key;
+            adapter.Get("w1").IsLocked = false;
+            clock.Advance(400);
+            coord.Tick();
+
+            var w1 = coord.CurrentState.FindWindow(key);
+            Assert.IsTrue(w1.IsManuallyUnlocked, "Unlock while focused must be treated as manual unlock.");
+            Assert.IsFalse(w1.CanParticipate);
+            Assert.IsFalse(adapter.Get("w1").IsLocked, "Coordinator must NOT re-lock a manual padlock unlock.");
+
+            // Focus moves elsewhere: still must not be re-locked on later reconciliations.
+            adapter.FocusedKey = null;
+            clock.Advance(400);
+            coord.Tick();
+            Assert.IsFalse(adapter.Get("w1").IsLocked);
+
+            // User re-locks via the standard padlock -> rejoins rotation.
+            adapter.Get("w1").IsLocked = true;
+            clock.Advance(400);
+            coord.Tick();
+            w1 = coord.CurrentState.FindWindow(key);
+            Assert.IsFalse(w1.IsManuallyUnlocked, "Standard UI re-lock must clear manual unlock.");
+            Assert.IsTrue(w1.CanParticipate);
+        }
+
+        [Test]
+        public void UnreadableLockState_IsNotTreatedAsLockDrop()
+        {
+            var (coord, adapter, sel, _, _, clock) = DomainLogicTests.CreateHarness(1, initialLocked: false);
+            sel.RegisterObject("A");
+            coord.EnqueueStartRotation();
+            coord.Tick();
+            DomainLogicTests.SelectAndTick(coord, sel, "A");
+
+            adapter.Get("w1").IsLocked = false;
+            adapter.Get("w1").FailRead = true;
+            clock.Advance(400);
+            coord.Tick();
+
+            Assert.IsFalse(adapter.Get("w1").IsLocked, "No recovery write may be issued for an unreadable lock state.");
+            Assert.IsFalse(coord.CurrentState.FindWindow(new WindowKey("w1")).IsManuallyUnlocked);
+        }
+
+        [Test]
+        public void FaultIsolatedWindow_RejoinsRotation_OnNextStart()
+        {
+            var (coord, adapter, sel, _, _, _) = DomainLogicTests.CreateHarness(3, initialLocked: false);
+            sel.RegisterObject("A");
+            sel.RegisterObject("B");
+            sel.RegisterObject("C");
+            coord.EnqueueStartRotation();
+            coord.Tick();
+            DomainLogicTests.SelectAndTick(coord, sel, "A");
+            DomainLogicTests.SelectAndTick(coord, sel, "B");
+
+            adapter.Get("w2").FailWriteTargets = true;
+            DomainLogicTests.SelectAndTick(coord, sel, "C");
+            Assert.IsTrue(coord.CurrentState.FindWindow(new WindowKey("w2")).IsFaultIsolated);
+
+            adapter.Get("w2").FailWriteTargets = false;
+            coord.EnqueueStartRotation();
+            coord.Tick();
+
+            var w2 = coord.CurrentState.FindWindow(new WindowKey("w2"));
+            Assert.AreEqual(RuntimeLifecycleState.Running, coord.CurrentState.LifecycleState);
+            Assert.IsFalse(w2.IsFaultIsolated, "A new session must clear fault isolation from the previous session.");
+            Assert.IsTrue(w2.CanParticipate, "Window locked at Start must also participate (no locked-but-frozen window).");
+        }
+
+        [Test]
+        public void ManualUnlockFromPreviousSession_IsClearedOnNextStart()
+        {
+            var (coord, adapter, _, _, _, _) = DomainLogicTests.CreateHarness(2, initialLocked: false);
+            var key = new WindowKey("w1");
+            coord.EnqueueStartRotation();
+            coord.Tick();
+
+            coord.EnqueueToggleLock(key);
+            coord.Tick();
+            Assert.IsTrue(coord.CurrentState.FindWindow(key).IsManuallyUnlocked);
+
+            coord.EnqueueStopRotation();
+            coord.Tick();
+
+            // Lock it while Off (plain manual setting).
+            coord.EnqueueToggleLock(key);
+            coord.Tick();
+            Assert.IsTrue(adapter.Get("w1").IsLocked);
+
+            coord.EnqueueStartRotation();
+            coord.Tick();
+            var w1 = coord.CurrentState.FindWindow(key);
+            Assert.IsFalse(w1.IsManuallyUnlocked, "Manual unlock is session-scoped and must not leak into the next session.");
+            Assert.IsTrue(w1.CanParticipate);
+        }
+
+        [Test]
+        public void ExclusionWhileOff_DoesNotWriteLock_AndStopRestoresUnlocked()
+        {
+            var (coord, adapter, _, _, _, _) = DomainLogicTests.CreateHarness(2, initialLocked: false);
+            var key = new WindowKey("w1");
+
+            coord.EnqueueSetExcluded(key, true);
+            coord.Tick();
+            Assert.IsTrue(coord.CurrentState.FindWindow(key).IsExplicitlyExcluded);
+            Assert.IsFalse(adapter.Get("w1").IsLocked, "Exclusion while Off must not write an un-leased lock.");
+
+            coord.EnqueueStartRotation();
+            coord.Tick();
+            Assert.IsTrue(adapter.Get("w1").IsLocked, "Start locks excluded windows under a lease.");
+            Assert.IsFalse(coord.CurrentState.Leases[key].OriginalLocked);
+
+            coord.EnqueueStopRotation();
+            coord.Tick();
+            Assert.AreEqual(RuntimeLifecycleState.Off, coord.CurrentState.LifecycleState);
+            Assert.IsFalse(adapter.Get("w1").IsLocked, "Stop must restore the user's original unlocked state.");
+        }
+
+        [Test]
         public void InitialLockedDisplayDiffersFromGlobalSelection_CacheDoesNotSkipRequiredWrite()
         {
             // Section 14.5 #6: Inspector #1 is already locked to X while global Selection is Y.

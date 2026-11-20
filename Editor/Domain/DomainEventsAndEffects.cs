@@ -45,18 +45,26 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         public string IdentityEvidence { get; }
         public SelectionSnapshot ObservedLockedSelection { get; }
 
+        /// <summary>
+        /// False when the lock state could not be read; ObservedLocked is then a placeholder and must not be
+        /// interpreted as a lock drop or a manual lock change.
+        /// </summary>
+        public bool IsLockReadable { get; }
+
         public ObservedWindowSnapshot(
             WindowKey key,
             bool observedLocked,
             string representativeName,
             string identityEvidence,
-            SelectionSnapshot observedLockedSelection = null)
+            SelectionSnapshot observedLockedSelection = null,
+            bool isLockReadable = true)
         {
             Key = key;
             ObservedLocked = observedLocked;
             RepresentativeName = representativeName ?? string.Empty;
             IdentityEvidence = identityEvidence ?? string.Empty;
             ObservedLockedSelection = observedLockedSelection;
+            IsLockReadable = isLockReadable;
         }
     }
 
