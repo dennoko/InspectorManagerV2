@@ -1,43 +1,69 @@
-/* Inspector Manager V2 — dennokoworks-design 独自レイアウト補助スタイル
+/* Inspector Manager V2 — dennokoworks-design コンパクト独自スタイル
  * 規則: すべてのルールに .dennoko-root を前置、カラーコード直書き禁止 (var(--dennoko-*) のみ)
  */
 
 .dennoko-root .imv2-banner-fixed {
     flex-shrink: 0;
-    margin-left: 8px;
-    margin-right: 8px;
-    margin-top: 6px;
+    margin-left: 6px;
+    margin-right: 6px;
+    margin-top: 4px;
 }
 
 .dennoko-root .imv2-helpbox-fixed {
     flex-shrink: 0;
-    margin-left: 8px;
-    margin-right: 8px;
-    margin-top: 6px;
+    margin-left: 6px;
+    margin-right: 6px;
+    margin-top: 4px;
+}
+
+.dennoko-root .imv2-running-banner {
+    min-height: 22px;
+    padding-top: 2px;
+    padding-bottom: 2px;
+    padding-left: 8px;
+    padding-right: 8px;
+}
+
+.dennoko-root .imv2-scroll {
+    padding-top: 6px;
+    padding-bottom: 4px;
+    padding-left: 6px;
+    padding-right: 6px;
 }
 
 .dennoko-root .imv2-section-card {
-    margin-bottom: 8px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    padding-left: 8px;
+    padding-right: 8px;
+    margin-bottom: 6px;
+    margin-left: 0;
+    margin-right: 0;
 }
 
-.dennoko-root .imv2-card-hint {
-    margin-top: 6px;
+.dennoko-root .imv2-section-card .dennoko-card-header {
+    margin-bottom: 4px;
+    padding-bottom: 3px;
+}
+
+.dennoko-root .imv2-empty-compact {
+    padding-top: 8px;
+    padding-bottom: 8px;
 }
 
 .dennoko-root .imv2-inspector-list {
     flex-direction: column;
 }
 
+/* 1行22pxの高密度 Inspector 行 */
 .dennoko-root .imv2-row {
     flex-direction: row;
     align-items: center;
-    min-height: 28px;
-    padding-left: 6px;
-    padding-right: 4px;
-    padding-top: 3px;
-    padding-bottom: 3px;
-    margin-bottom: 4px;
-    border-radius: 4px;
+    height: 22px;
+    padding-left: 5px;
+    padding-right: 2px;
+    margin-bottom: 2px;
+    border-radius: 3px;
     background-color: var(--dennoko-surface-0);
     border-width: 1px;
     border-color: var(--dennoko-outline-subtle);
@@ -49,85 +75,85 @@
 }
 
 .dennoko-root .imv2-row--participating {
-    border-left-width: 3px;
+    border-left-width: 2px;
     border-left-color: var(--dennoko-selection-border);
 }
 
 .dennoko-root .imv2-row--excluded {
-    border-left-width: 3px;
+    border-left-width: 2px;
     border-left-color: var(--dennoko-semantic-warning);
 }
 
 .dennoko-root .imv2-row--unlocked {
-    border-left-width: 3px;
+    border-left-width: 2px;
     border-left-color: var(--dennoko-text-tertiary);
 }
 
 .dennoko-root .imv2-row--fault {
-    border-left-width: 3px;
+    border-left-width: 2px;
     border-left-color: var(--dennoko-semantic-error-text);
 }
 
 .dennoko-root .imv2-row__num {
-    width: 28px;
+    width: 22px;
     flex-shrink: 0;
     -unity-font-style: bold;
     color: var(--dennoko-text-primary);
-    font-size: 11px;
+    font-size: 10px;
+    margin-right: 2px;
 }
 
-.dennoko-root .imv2-row__role {
-    min-width: 44px;
+.dennoko-root .imv2-row__badge {
+    min-width: 34px;
+    height: 16px;
     flex-shrink: 0;
-    margin-right: 4px;
+    margin-right: 5px;
     padding-left: 4px;
     padding-right: 4px;
-    padding-top: 1px;
-    padding-bottom: 1px;
     border-radius: 3px;
-    font-size: 10px;
+    font-size: 9px;
     -unity-text-align: middle-center;
     background-color: var(--dennoko-surface-2);
     color: var(--dennoko-text-secondary);
 }
 
-.dennoko-root .imv2-row__role--latest {
+.dennoko-root .imv2-row__badge--latest {
     background-color: var(--dennoko-selection-bg);
     border-width: 1px;
     border-color: var(--dennoko-selection-border);
     color: var(--dennoko-text-primary);
 }
 
-.dennoko-root .imv2-row__main {
-    flex-grow: 1;
-    flex-shrink: 1;
-    overflow: hidden;
-    flex-direction: column;
-    margin-right: 4px;
-}
-
-.dennoko-root .imv2-row__target {
-    color: var(--dennoko-text-primary);
-    font-size: 11px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.dennoko-root .imv2-row__sub {
-    color: var(--dennoko-text-tertiary);
-    font-size: 10px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.dennoko-root .imv2-row__sub--warning {
+.dennoko-root .imv2-row__badge--excluded {
+    border-width: 1px;
+    border-color: var(--dennoko-semantic-warning);
     color: var(--dennoko-semantic-warning);
 }
 
-.dennoko-root .imv2-row__sub--error {
+.dennoko-root .imv2-row__badge--unlocked {
+    color: var(--dennoko-text-tertiary);
+}
+
+.dennoko-root .imv2-row__badge--fault {
+    border-width: 1px;
+    border-color: var(--dennoko-semantic-error-text);
     color: var(--dennoko-semantic-error-text);
+}
+
+.dennoko-root .imv2-row__target {
+    flex-grow: 1;
+    flex-shrink: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--dennoko-text-primary);
+    font-size: 11px;
+    margin-right: 4px;
+    -unity-text-align: middle-left;
+}
+
+.dennoko-root .imv2-row__target--dim {
+    color: var(--dennoko-text-tertiary);
 }
 
 .dennoko-root .imv2-row__actions {
@@ -136,45 +162,49 @@
     flex-shrink: 0;
 }
 
-.dennoko-root .imv2-row-btn {
-    height: 20px;
-    min-width: 22px;
-    padding-left: 5px;
-    padding-right: 5px;
+.dennoko-root .imv2-row-micro-btn {
+    width: 18px;
+    height: 18px;
+    padding-left: 0;
+    padding-right: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    margin-left: 1px;
+    margin-right: 0;
+    font-size: 9px;
+    flex-shrink: 0;
+    -unity-text-align: middle-center;
+}
+
+.dennoko-root .imv2-row-action-btn {
+    height: 18px;
+    padding-left: 6px;
+    padding-right: 6px;
+    padding-top: 0;
+    padding-bottom: 0;
     margin-left: 2px;
     margin-right: 0;
     font-size: 10px;
     flex-shrink: 0;
 }
 
-.dennoko-root .imv2-row-btn--lock-on {
+.dennoko-root .imv2-row-lock-btn {
+    width: 20px;
+    height: 18px;
+    margin-left: 2px;
+    margin-right: 1px;
+    flex-shrink: 0;
+}
+
+.dennoko-root .imv2-row-lock-btn--on {
+    border-width: 1px;
     border-color: var(--dennoko-selection-border);
     background-color: var(--dennoko-selection-bg);
-    color: var(--dennoko-text-primary);
 }
 
-.dennoko-root .imv2-row-btn--excluded {
-    border-color: var(--dennoko-semantic-warning);
-    color: var(--dennoko-semantic-warning);
-}
-
-.dennoko-root .imv2-sub-separator {
-    margin-top: 8px;
-    margin-bottom: 8px;
-}
-
-.dennoko-root .imv2-sub-title {
-    margin-bottom: 2px;
-}
-
-.dennoko-root .imv2-category-grid {
-    flex-direction: row;
-    flex-wrap: wrap;
-    margin-top: 6px;
-}
-
-.dennoko-root .imv2-category-toggle {
-    width: 120px;
-    margin-right: 6px;
-    margin-bottom: 2px;
+.dennoko-root .imv2-footer {
+    padding-top: 6px;
+    padding-bottom: 6px;
+    padding-left: 8px;
+    padding-right: 8px;
 }

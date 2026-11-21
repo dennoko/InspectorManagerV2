@@ -17,9 +17,8 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
     }
 
     /// <summary>
-    /// UI Toolkit (UXML/USS) EditorWindow implementing the dennokoworks floating design system.
-    /// Displays History-mode managed Inspector order/state management and collapsible Advanced Settings.
-    /// Never mutates Unity Inspectors or saves files synchronously from UI callbacks; only enqueues commands.
+    /// Compact UI Toolkit (UXML/USS) EditorWindow implementing the dennokoworks floating design system.
+    /// Displays single-line high-density managed Inspector rows; Detailed Settings live in the header's ⋮ menu.
     /// </summary>
     public sealed class InspectorManagerWindow : EditorWindow
     {
@@ -28,9 +27,14 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
         private const string WINDOW_USS_GUID = "a1d8c4f0e72b4a918c3e5f6d10b2a403";
         private const string UXML_GUID       = "a1d8c4f0e72b4a918c3e5f6d10b2a404";
 
+        private const string LockOnIconNames  = "IN LockButton on|d_InspectorLock|InspectorLock";
+        private const string LockOffIconNames = "IN LockButton|d_Unlocked|Unlocked";
+
         private const string ToolName = "Inspector Manager V2";
 
         public static Func<IManagerWindowHost> HostProvider;
+
+        private static readonly int[] s_historyCapacityPresets = { 10, 20, 30, 50, 100, 200 };
 
         private static readonly ObjectCategory[] s_configurableCategories =
         {
@@ -56,11 +60,9 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
         private bool _uiBuilt;
         private bool _suppressControlCallbacks;
 
-        // Shared components
         private DennokoAppBar _appBar;
         private DennokoStatus _status;
 
-        // Bound UXML elements
         private VisualElement _faultBanner;
         private Label _faultBannerText;
         private Button _retryRestoreButton;
@@ -76,24 +78,10 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
         private VisualElement _managedEmpty;
         private Label _managedEmptyMessage;
         private Button _managedEmptyAdd;
-        private Label _historyMruHint;
 
         private VisualElement _externalCard;
         private Label _externalCardTitle;
         private VisualElement _externalList;
-        private Label _externalHint;
-
-        private VisualElement _advancedDetails;
-        private Label _advancedDetailsTitle;
-        private VisualElement _advancedDetailsChips;
-        private SliderInt _maxHistorySlider;
-        private Toggle _recordSceneToggle;
-        private Toggle _recordAssetsToggle;
-        private Toggle _showOverlaysToggle;
-        private Label _blockedCategoriesTitle;
-        private Label _blockedCategoriesHint;
-        private VisualElement _blockedCategoriesGrid;
-        private readonly Dictionary<ObjectCategory, Toggle> _categoryToggles = new Dictionary<ObjectCategory, Toggle>();
 
         private Label _footerInfo;
         private Button _addInspectorButton;
@@ -121,7 +109,7 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
         private void OnEnable()
         {
             titleContent = new GUIContent(ToolName);
-            minSize = new Vector2(360f, 360f);
+            minSize = new Vector2(260f, 200f);
             EnsureHostAttached();
         }
 
@@ -152,15 +140,12 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
             VisualElement root = rootVisualElement;
             root.Clear();
 
-            // テーマ非依存ルート設定 (dennokoworks-design 絶対規則)
             root.AddToClassList("dennoko-root");
             root.style.backgroundColor = (Color)new Color32(0x12, 0x12, 0x12, 0xFF);
             root.style.flexGrow = 1;
 
-            // 標準フォント適用 (メイリオ SDF + 自己修復)
             DennokoUIFont.Apply(root);
 
-            // USS ロード順: Theme -> Blocks -> Window
             AddStyleSheet(root, THEME_USS_GUID);
             AddStyleSheet(root, BLOCKS_USS_GUID);
             AddStyleSheet(root, WINDOW_USS_GUID);
@@ -212,12 +197,7 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
             _appBar = new DennokoAppBar(root, ToolName)
             {
                 ResetAll = () => _host?.Coordinator.EnqueueResetSettings(),
-                AddToolMenuItems = menu =>
-                {
-                    string lang = _host != null ? _host.Coordinator.CurrentState.Settings.Language : "ja";
-                    menu.AddItem(new GUIContent(Localization.Get(lang, "MenuRefresh")), false, () => _host?.Coordinator.EnqueueSynchronizeWindows());
-                    menu.AddItem(new GUIContent(Localization.Get(lang, "MenuResetLayout")), false, () => _host?.Coordinator.EnqueueResetLayout());
-                }
+                AddToolMenuItems = PopulateHeaderSettingsMenu
             };
             _appBar.LanguageChanged += english =>
             {
@@ -257,68 +237,10 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
             _managedEmptyMessage = root.Q<Label>("managed-empty-message");
             _managedEmptyAdd = root.Q<Button>("managed-empty-add");
             if (_managedEmptyAdd != null) _managedEmptyAdd.clicked += () => _host?.Coordinator.EnqueueAddInspector();
-            _historyMruHint = root.Q<Label>("history-mru-hint");
 
             _externalCard = root.Q<VisualElement>("external-card");
             _externalCardTitle = root.Q<Label>("external-card-title");
             _externalList = root.Q<VisualElement>("external-list");
-            _externalHint = root.Q<Label>("external-hint");
-
-            // 詳細設定 (.dennoko-details: 既定折りたたみ＋要約チップ)
-            _advancedDetails = root.Q<VisualElement>("advanced-details");
-            _advancedDetailsTitle = root.Q<Label>("advanced-details-title");
-            _advancedDetailsChips = root.Q<VisualElement>("advanced-details-chips");
-            DennokoBlockUI.BindDetails(_advancedDetails, open: false);
-
-            _maxHistorySlider = root.Q<SliderInt>("max-history-slider");
-            _recordSceneToggle = root.Q<Toggle>("record-scene-toggle");
-            _recordAssetsToggle = root.Q<Toggle>("record-assets-toggle");
-            _showOverlaysToggle = root.Q<Toggle>("show-overlays-toggle");
-            _blockedCategoriesTitle = root.Q<Label>("blocked-categories-title");
-            _blockedCategoriesHint = root.Q<Label>("blocked-categories-hint");
-            _blockedCategoriesGrid = root.Q<VisualElement>("blocked-categories-grid");
-
-            _maxHistorySlider?.RegisterValueChangedCallback(evt =>
-            {
-                if (_suppressControlCallbacks || _host == null) return;
-                var cur = _host.Coordinator.CurrentState.Settings;
-                if (evt.newValue != cur.MaxRotationHistory)
-                {
-                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(maxRotationHistory: evt.newValue));
-                }
-            });
-
-            _recordSceneToggle?.RegisterValueChangedCallback(evt =>
-            {
-                if (_suppressControlCallbacks || _host == null) return;
-                var cur = _host.Coordinator.CurrentState.Settings;
-                if (evt.newValue != cur.RecordSceneObjects)
-                {
-                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(recordSceneObjects: evt.newValue));
-                }
-            });
-
-            _recordAssetsToggle?.RegisterValueChangedCallback(evt =>
-            {
-                if (_suppressControlCallbacks || _host == null) return;
-                var cur = _host.Coordinator.CurrentState.Settings;
-                if (evt.newValue != cur.RecordAssets)
-                {
-                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(recordAssets: evt.newValue));
-                }
-            });
-
-            _showOverlaysToggle?.RegisterValueChangedCallback(evt =>
-            {
-                if (_suppressControlCallbacks || _host == null) return;
-                var cur = _host.Coordinator.CurrentState.Settings;
-                if (evt.newValue != cur.ShowInspectorOverlays)
-                {
-                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(showInspectorOverlays: evt.newValue));
-                }
-            });
-
-            BuildCategoryToggles();
 
             _footerInfo = root.Q<Label>("footer-info");
             _addInspectorButton = root.Q<Button>("add-inspector-button");
@@ -347,28 +269,94 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
             }
         }
 
-        private void BuildCategoryToggles()
+        private void PopulateHeaderSettingsMenu(GenericMenu menu)
         {
-            if (_blockedCategoriesGrid == null) return;
-            _blockedCategoriesGrid.Clear();
-            _categoryToggles.Clear();
+            if (_host == null) return;
+            var settings = _host.Coordinator.CurrentState.Settings;
+            string lang = settings.Language;
+
+            // 操作項目
+            menu.AddItem(new GUIContent(Localization.Get(lang, "MenuRefresh")), false, () => _host?.Coordinator.EnqueueSynchronizeWindows());
+            menu.AddItem(new GUIContent(Localization.Get(lang, "MenuResetLayout")), false, () => _host?.Coordinator.EnqueueResetLayout());
+            menu.AddSeparator(string.Empty);
+
+            // 詳細設定トグル群
+            menu.AddItem(
+                new GUIContent(Localization.Get(lang, "RecordSceneObjects")),
+                settings.RecordSceneObjects,
+                () =>
+                {
+                    var cur = _host.Coordinator.CurrentState.Settings;
+                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(recordSceneObjects: !cur.RecordSceneObjects));
+                });
+
+            menu.AddItem(
+                new GUIContent(Localization.Get(lang, "RecordAssets")),
+                settings.RecordAssets,
+                () =>
+                {
+                    var cur = _host.Coordinator.CurrentState.Settings;
+                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(recordAssets: !cur.RecordAssets));
+                });
+
+            menu.AddItem(
+                new GUIContent(Localization.Get(lang, "ShowOverlays")),
+                settings.ShowInspectorOverlays,
+                () =>
+                {
+                    var cur = _host.Coordinator.CurrentState.Settings;
+                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(showInspectorOverlays: !cur.ShowInspectorOverlays));
+                });
+
+            // 履歴保持数サブメニュー
+            string capMenuRoot = Localization.Get(lang, "MaxRotHistory") + " (" + settings.MaxRotationHistory + ")/";
+            for (int i = 0; i < s_historyCapacityPresets.Length; i++)
+            {
+                int preset = s_historyCapacityPresets[i];
+                menu.AddItem(
+                    new GUIContent(capMenuRoot + preset),
+                    settings.MaxRotationHistory == preset,
+                    () =>
+                    {
+                        var cur = _host.Coordinator.CurrentState.Settings;
+                        _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(maxRotationHistory: preset));
+                    });
+            }
+
+            // カテゴリ別更新ブロックサブメニュー
+            int blockedCount = settings.BlockedCategories.Count;
+            string blockMenuRoot = (blockedCount > 0
+                ? Localization.Format(lang, "MenuBlockedCategoriesCount", blockedCount)
+                : Localization.Get(lang, "BlockedCategoriesHeader")) + "/";
 
             for (int i = 0; i < s_configurableCategories.Length; i++)
             {
                 var cat = s_configurableCategories[i];
-                var toggle = new Toggle(Localization.CategoryLabel("ja", cat));
-                toggle.AddToClassList("imv2-category-toggle");
-                toggle.RegisterValueChangedCallback(evt =>
-                {
-                    if (_suppressControlCallbacks || _host == null) return;
-                    var cur = _host.Coordinator.CurrentState.Settings;
-                    var nextSet = new HashSet<ObjectCategory>(cur.BlockedCategories);
-                    if (evt.newValue) nextSet.Add(cat);
-                    else nextSet.Remove(cat);
-                    _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(blockedCategories: nextSet));
-                });
-                _categoryToggles[cat] = toggle;
-                _blockedCategoriesGrid.Add(toggle);
+                bool isBlocked = settings.BlockedCategories.Contains(cat);
+                menu.AddItem(
+                    new GUIContent(blockMenuRoot + Localization.CategoryLabel(lang, cat)),
+                    isBlocked,
+                    () =>
+                    {
+                        var cur = _host.Coordinator.CurrentState.Settings;
+                        var nextSet = new HashSet<ObjectCategory>(cur.BlockedCategories);
+                        if (nextSet.Contains(cat)) nextSet.Remove(cat);
+                        else nextSet.Add(cat);
+                        _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(blockedCategories: nextSet));
+                    });
+            }
+
+            if (blockedCount > 0)
+            {
+                menu.AddSeparator(blockMenuRoot);
+                menu.AddItem(
+                    new GUIContent(blockMenuRoot + Localization.Get(lang, "MenuClearBlockedCategories")),
+                    false,
+                    () =>
+                    {
+                        var cur = _host.Coordinator.CurrentState.Settings;
+                        _host.Coordinator.EnqueueUpdateSettings(cur.WithNextRevision(blockedCategories: Array.Empty<ObjectCategory>()));
+                    });
             }
         }
 
@@ -387,7 +375,6 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
             {
                 _appBar?.SetEnglish(isEn);
 
-                // バナー類
                 bool showFault = state.LifecycleState == RuntimeLifecycleState.Faulted || state.HasIncompleteRestorations;
                 DennokoBlockUI.Show(_faultBanner, showFault);
                 if (showFault && _faultBannerText != null)
@@ -396,32 +383,19 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
                         ? Localization.Get(lang, "StatusFaulted")
                         : state.LastError;
                 }
-                if (_retryRestoreButton != null)
-                {
-                    _retryRestoreButton.text = Localization.Get(lang, "RetryRestore");
-                }
+                if (_retryRestoreButton != null) _retryRestoreButton.text = Localization.Get(lang, "RetryRestore");
 
                 string warningText = null;
-                if (!state.Capabilities.SupportsRotation)
-                {
-                    warningText = Localization.Get(lang, "RotationUnavailable");
-                }
-                else if (state.PersistenceWriteBlocked)
-                {
-                    warningText = Localization.Get(lang, "PersistenceBlocked");
-                }
+                if (!state.Capabilities.SupportsRotation) warningText = Localization.Get(lang, "RotationUnavailable");
+                else if (state.PersistenceWriteBlocked) warningText = Localization.Get(lang, "PersistenceBlocked");
                 DennokoBlockUI.Show(_warningHelpBox, !string.IsNullOrEmpty(warningText));
-                if (_warningHelpBox != null && !string.IsNullOrEmpty(warningText))
-                {
-                    _warningHelpBox.text = warningText;
-                }
+                if (_warningHelpBox != null && !string.IsNullOrEmpty(warningText)) _warningHelpBox.text = warningText;
 
                 bool isRunning = state.LifecycleState == RuntimeLifecycleState.Running;
                 DennokoBlockUI.Show(_runningBanner, isRunning);
                 if (_runningBannerState != null) _runningBannerState.text = Localization.Get(lang, "StatusRunning");
                 if (_runningBannerDetail != null) _runningBannerDetail.text = Localization.Get(lang, "RunningBannerDetail");
 
-                // 管理対象 / 外部 Inspector 一覧
                 var managed = state.GetManagedAliveWindowsOrdered();
                 var participating = state.GetParticipatingWindowsOrdered();
                 var external = state.Windows.Where(w => !w.IsManaged && w.IsAlive).OrderBy(w => w.FixedDisplayNumber).ToArray();
@@ -429,10 +403,10 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
                 if (_managedCardTitle != null)
                 {
                     _managedCardTitle.text = Localization.Format(lang, "ManagedInspectors", managed.Count);
+                    _managedCardTitle.tooltip = Localization.Get(lang, "HistoryMruHint");
                 }
                 if (_refreshButton != null) _refreshButton.tooltip = Localization.Get(lang, "RefreshTooltip");
                 if (_resetLayoutButton != null) _resetLayoutButton.tooltip = Localization.Get(lang, "ResetLayoutTooltip");
-                if (_historyMruHint != null) _historyMruHint.text = Localization.Get(lang, "HistoryMruHint");
 
                 RebuildManagedList(state, managed, participating, lang);
 
@@ -440,14 +414,10 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
                 if (_externalCardTitle != null)
                 {
                     _externalCardTitle.text = Localization.Format(lang, "ExternalInspectors", external.Length);
+                    _externalCardTitle.tooltip = Localization.Get(lang, "ExternalHint");
                 }
-                if (_externalHint != null) _externalHint.text = Localization.Get(lang, "ExternalHint");
                 RebuildExternalList(external, lang);
 
-                // 詳細設定コントロール同期 & 要約チップ更新
-                SyncAdvancedSettings(settings, lang);
-
-                // フッター & ステータスバー
                 if (_footerInfo != null)
                 {
                     _footerInfo.text = Localization.Format(lang, "FooterSummary", participating.Count, managed.Count);
@@ -456,6 +426,7 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
                 if (_addInspectorButton != null)
                 {
                     _addInspectorButton.text = Localization.Get(lang, "AddInspector");
+                    _addInspectorButton.tooltip = Localization.Get(lang, "AddInspectorTooltip");
                     _addInspectorButton.SetEnabled(state.Capabilities.CanCreateWindow);
                 }
 
@@ -506,6 +477,8 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
             {
                 var w = managed[i];
                 int rowIndex = i;
+                var capturedKey = w.Key;
+
                 var row = new VisualElement();
                 row.AddToClassList("imv2-row");
 
@@ -518,62 +491,59 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
                 numLabel.AddToClassList("imv2-row__num");
                 row.Add(numLabel);
 
-                string roleText = "-";
-                bool isLatest = false;
-                if (w.CanParticipate && roleSlotMap.TryGetValue(w.Key, out int slot))
+                var badge = new Label();
+                badge.AddToClassList("imv2-row__badge");
+                if (w.IsFaultIsolated)
                 {
-                    isLatest = slot == 0;
-                    roleText = isLatest ? Localization.Get(lang, "RoleLatest") : ("-" + slot);
+                    badge.text = Localization.Get(lang, "BadgeFault");
+                    badge.AddToClassList("imv2-row__badge--fault");
                 }
-                var roleLabel = new Label(roleText);
-                roleLabel.AddToClassList("imv2-row__role");
-                if (isLatest) roleLabel.AddToClassList("imv2-row__role--latest");
-                row.Add(roleLabel);
+                else if (w.IsExplicitlyExcluded)
+                {
+                    badge.text = Localization.Get(lang, "BadgeExcluded");
+                    badge.AddToClassList("imv2-row__badge--excluded");
+                }
+                else if (w.IsManuallyUnlocked)
+                {
+                    badge.text = Localization.Get(lang, "BadgeUnlocked");
+                    badge.AddToClassList("imv2-row__badge--unlocked");
+                }
+                else if (w.CanParticipate && roleSlotMap.TryGetValue(w.Key, out int slot))
+                {
+                    bool isLatest = slot == 0;
+                    badge.text = isLatest ? Localization.Get(lang, "RoleLatest") : ("-" + slot);
+                    if (isLatest) badge.AddToClassList("imv2-row__badge--latest");
+                }
+                else
+                {
+                    badge.text = "-";
+                }
+                row.Add(badge);
 
-                var mainCol = new VisualElement();
-                mainCol.AddToClassList("imv2-row__main");
-
-                string targetName = w.AssignedSelection != null && !w.AssignedSelection.IsEmpty
+                bool hasAssigned = w.AssignedSelection != null && !w.AssignedSelection.IsEmpty;
+                string targetName = hasAssigned
                     ? w.AssignedSelection.BuildDisplaySummary()
                     : (string.IsNullOrEmpty(w.ObservedRepresentativeName) ? Localization.Get(lang, "EmptyTarget") : w.ObservedRepresentativeName);
 
                 var targetLabel = new Label(targetName);
                 targetLabel.AddToClassList("imv2-row__target");
-                mainCol.Add(targetLabel);
-
-                string statusPart = GetWindowStatusText(w, lang);
-                if (w.AssignmentLabel == AssignmentLabel.InitialDisplay)
+                if (!hasAssigned && string.IsNullOrEmpty(w.ObservedRepresentativeName))
                 {
-                    statusPart += " · " + Localization.Get(lang, "LabelInitialDisplay");
+                    targetLabel.AddToClassList("imv2-row__target--dim");
                 }
-                else if (w.AssignmentLabel == AssignmentLabel.HistoryUnassigned)
-                {
-                    statusPart += " · " + Localization.Get(lang, "LabelHistoryUnassigned");
-                }
-                if (w.IsFaultIsolated && !string.IsNullOrEmpty(w.FaultReason))
-                {
-                    statusPart += " · " + w.FaultReason;
-                }
-
-                var subLabel = new Label(statusPart);
-                subLabel.AddToClassList("imv2-row__sub");
-                if (w.IsFaultIsolated) subLabel.AddToClassList("imv2-row__sub--error");
-                else if (w.IsExplicitlyExcluded || w.IsManuallyUnlocked) subLabel.AddToClassList("imv2-row__sub--warning");
-                mainCol.Add(subLabel);
-
-                row.Add(mainCol);
+                targetLabel.tooltip = BuildRowTooltip(w, targetName, lang);
+                targetLabel.RegisterCallback<ClickEvent>(_ => _host?.Coordinator.EnqueueFocusInspector(capturedKey));
+                row.Add(targetLabel);
 
                 var actions = new VisualElement();
                 actions.AddToClassList("imv2-row__actions");
-
-                var capturedKey = w.Key;
 
                 var upBtn = new Button(() => _host?.Coordinator.EnqueueReorderWindow(capturedKey, rowIndex - 1))
                 {
                     text = "▲",
                     tooltip = Localization.Get(lang, "BtnUpTooltip")
                 };
-                upBtn.AddToClassList("imv2-row-btn");
+                upBtn.AddToClassList("imv2-row-micro-btn");
                 upBtn.SetEnabled(rowIndex > 0);
                 actions.Add(upBtn);
 
@@ -582,47 +552,58 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
                     text = "▼",
                     tooltip = Localization.Get(lang, "BtnDownTooltip")
                 };
-                downBtn.AddToClassList("imv2-row-btn");
+                downBtn.AddToClassList("imv2-row-micro-btn");
                 downBtn.SetEnabled(rowIndex < managed.Count - 1);
                 actions.Add(downBtn);
 
-                var lockBtn = new Button(() => _host?.Coordinator.EnqueueToggleLock(capturedKey))
-                {
-                    text = Localization.Get(lang, w.ObservedLocked ? "BtnLock" : "BtnUnlock")
-                };
-                lockBtn.AddToClassList("imv2-row-btn");
-                if (w.ObservedLocked) lockBtn.AddToClassList("imv2-row-btn--lock-on");
+                var lockBtn = new Button(() => _host?.Coordinator.EnqueueToggleLock(capturedKey));
+                lockBtn.AddToClassList("dennoko-icon-button");
+                lockBtn.AddToClassList("imv2-row-lock-btn");
+                if (w.ObservedLocked) lockBtn.AddToClassList("imv2-row-lock-btn--on");
+                DennokoIcons.Apply(
+                    lockBtn,
+                    w.ObservedLocked ? LockOnIconNames : LockOffIconNames,
+                    w.ObservedLocked ? "鍵" : "開",
+                    Localization.Get(lang, w.ObservedLocked ? "LockOnTooltip" : "LockOffTooltip"));
                 lockBtn.SetEnabled(state.Capabilities.CanWriteLock);
                 actions.Add(lockBtn);
 
-                bool nextExcluded = !w.IsExplicitlyExcluded;
-                var exBtn = new Button(() => _host?.Coordinator.EnqueueSetExcluded(capturedKey, nextExcluded))
-                {
-                    text = Localization.Get(lang, w.IsExplicitlyExcluded ? "BtnInclude" : "BtnExclude")
-                };
-                exBtn.AddToClassList("imv2-row-btn");
-                if (w.IsExplicitlyExcluded) exBtn.AddToClassList("imv2-row-btn--excluded");
-                actions.Add(exBtn);
-
-                var focusBtn = new Button(() => _host?.Coordinator.EnqueueFocusInspector(capturedKey))
-                {
-                    text = Localization.Get(lang, "BtnFocus")
-                };
-                focusBtn.AddToClassList("imv2-row-btn");
-                actions.Add(focusBtn);
-
-                var closeBtn = new Button(() => _host?.Coordinator.EnqueueCloseInspector(capturedKey))
-                {
-                    text = "×",
-                    tooltip = Localization.Get(lang, "BtnCloseTooltip")
-                };
-                closeBtn.AddToClassList("imv2-row-btn");
-                closeBtn.SetEnabled(state.Capabilities.CanCloseWindow);
-                actions.Add(closeBtn);
+                bool isExcluded = w.IsExplicitlyExcluded;
+                bool canClose = state.Capabilities.CanCloseWindow;
+                var menuBtn = new Button();
+                menuBtn.AddToClassList("dennoko-icon-button");
+                menuBtn.AddToClassList("imv2-row-micro-btn");
+                DennokoIcons.Apply(menuBtn, DennokoIcons.Menu, "⋮", Localization.Get(lang, "RowMenuTooltip"));
+                menuBtn.clicked += () => ShowRowMenu(menuBtn, capturedKey, isExcluded, canClose, lang);
+                actions.Add(menuBtn);
 
                 row.Add(actions);
                 _managedList.Add(row);
             }
+        }
+
+        private void ShowRowMenu(VisualElement anchor, WindowKey key, bool isExcluded, bool canClose, string lang)
+        {
+            var menu = new GenericMenu();
+            menu.AddItem(
+                new GUIContent(Localization.Get(lang, isExcluded ? "RowMenuInclude" : "RowMenuExclude")),
+                false,
+                () => _host?.Coordinator.EnqueueSetExcluded(key, !isExcluded));
+            menu.AddItem(
+                new GUIContent(Localization.Get(lang, "RowMenuFocus")),
+                false,
+                () => _host?.Coordinator.EnqueueFocusInspector(key));
+
+            if (canClose)
+            {
+                menu.AddSeparator(string.Empty);
+                menu.AddItem(
+                    new GUIContent(Localization.Get(lang, "RowMenuClose")),
+                    false,
+                    () => _host?.Coordinator.EnqueueCloseInspector(key));
+            }
+
+            menu.DropDown(anchor.worldBound);
         }
 
         private void RebuildExternalList(WindowRecord[] external, string lang)
@@ -639,95 +620,24 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
                 row.AddToClassList("imv2-row");
 
                 var badge = new Label("EXT");
-                badge.AddToClassList("imv2-row__num");
+                badge.AddToClassList("imv2-row__badge");
                 row.Add(badge);
 
-                var mainCol = new VisualElement();
-                mainCol.AddToClassList("imv2-row__main");
-                var nameLabel = new Label(string.IsNullOrEmpty(ext.ObservedRepresentativeName) ? "(Inspector)" : ext.ObservedRepresentativeName);
+                string repName = string.IsNullOrEmpty(ext.ObservedRepresentativeName) ? "(Inspector)" : ext.ObservedRepresentativeName;
+                var nameLabel = new Label(repName);
                 nameLabel.AddToClassList("imv2-row__target");
-                mainCol.Add(nameLabel);
-                row.Add(mainCol);
-
-                var actions = new VisualElement();
-                actions.AddToClassList("imv2-row__actions");
+                nameLabel.tooltip = repName + " — " + Localization.Get(lang, "RowMenuFocus");
+                nameLabel.RegisterCallback<ClickEvent>(_ => _host?.Coordinator.EnqueueFocusInspector(capturedKey));
+                row.Add(nameLabel);
 
                 var adoptBtn = new Button(() => _host?.Coordinator.EnqueueAdoptInspector(capturedKey))
                 {
                     text = Localization.Get(lang, "Adopt")
                 };
-                adoptBtn.AddToClassList("imv2-row-btn");
-                actions.Add(adoptBtn);
+                adoptBtn.AddToClassList("imv2-row-action-btn");
+                row.Add(adoptBtn);
 
-                var focusBtn = new Button(() => _host?.Coordinator.EnqueueFocusInspector(capturedKey))
-                {
-                    text = Localization.Get(lang, "BtnFocus")
-                };
-                focusBtn.AddToClassList("imv2-row-btn");
-                actions.Add(focusBtn);
-
-                row.Add(actions);
                 _externalList.Add(row);
-            }
-        }
-
-        private void SyncAdvancedSettings(ManagerSettings settings, string lang)
-        {
-            if (_advancedDetailsTitle != null) _advancedDetailsTitle.text = Localization.Get(lang, "AdvancedSettings");
-
-            if (_maxHistorySlider != null)
-            {
-                _maxHistorySlider.label = Localization.Get(lang, "MaxRotHistory");
-                _maxHistorySlider.SetValueWithoutNotify(settings.MaxRotationHistory);
-            }
-            if (_recordSceneToggle != null)
-            {
-                _recordSceneToggle.text = Localization.Get(lang, "RecordSceneObjects");
-                _recordSceneToggle.SetValueWithoutNotify(settings.RecordSceneObjects);
-            }
-            if (_recordAssetsToggle != null)
-            {
-                _recordAssetsToggle.text = Localization.Get(lang, "RecordAssets");
-                _recordAssetsToggle.SetValueWithoutNotify(settings.RecordAssets);
-            }
-            if (_showOverlaysToggle != null)
-            {
-                _showOverlaysToggle.text = Localization.Get(lang, "ShowOverlays");
-                _showOverlaysToggle.SetValueWithoutNotify(settings.ShowInspectorOverlays);
-            }
-            if (_blockedCategoriesTitle != null) _blockedCategoriesTitle.text = Localization.Get(lang, "BlockedCategoriesHeader");
-            if (_blockedCategoriesHint != null) _blockedCategoriesHint.text = Localization.Get(lang, "BlockedCategoriesHint");
-
-            foreach (var kvp in _categoryToggles)
-            {
-                kvp.Value.text = Localization.CategoryLabel(lang, kvp.Key);
-                kvp.Value.SetValueWithoutNotify(settings.BlockedCategories.Contains(kvp.Key));
-            }
-
-            // 閉じている間の要約チップ (.dennoko-summary-chip: 初期値と異なる項目だけ表示)
-            if (_advancedDetailsChips != null)
-            {
-                _advancedDetailsChips.Clear();
-                if (settings.BlockedCategories.Count > 0)
-                {
-                    _advancedDetailsChips.Add(DennokoBlockUI.Chip(null, Localization.Format(lang, "ChipBlocked", settings.BlockedCategories.Count)));
-                }
-                if (!settings.RecordSceneObjects)
-                {
-                    _advancedDetailsChips.Add(DennokoBlockUI.Chip(null, Localization.Get(lang, "ChipSceneOff")));
-                }
-                if (!settings.RecordAssets)
-                {
-                    _advancedDetailsChips.Add(DennokoBlockUI.Chip(null, Localization.Get(lang, "ChipAssetsOff")));
-                }
-                if (!settings.ShowInspectorOverlays)
-                {
-                    _advancedDetailsChips.Add(DennokoBlockUI.Chip(null, Localization.Get(lang, "ChipOverlayOff")));
-                }
-                if (settings.MaxRotationHistory != 20)
-                {
-                    _advancedDetailsChips.Add(DennokoBlockUI.Chip(null, Localization.Format(lang, "ChipHistory", settings.MaxRotationHistory)));
-                }
             }
         }
 
@@ -758,16 +668,27 @@ namespace DennokoWorks.InspectorManagerV2.Presentation
                 return;
             }
 
-            string lifecycleText = Localization.LifecycleLabel(lang, state.LifecycleState);
-            _status.Set(lifecycleText, DennokoStatusType.Info);
+            _status.Set(Localization.LifecycleLabel(lang, state.LifecycleState), DennokoStatusType.Info);
         }
 
-        private static string GetWindowStatusText(WindowRecord w, string lang)
+        private static string BuildRowTooltip(WindowRecord w, string targetName, string lang)
         {
-            if (w.IsFaultIsolated) return Localization.Get(lang, "StateFaultIsolated");
-            if (w.IsExplicitlyExcluded) return Localization.Get(lang, "StateExcluded");
-            if (w.IsManuallyUnlocked) return Localization.Get(lang, "StateManuallyUnlocked");
-            return Localization.Get(lang, "StateParticipating");
+            string status;
+            if (w.IsFaultIsolated) status = Localization.Get(lang, "StateFaultIsolated");
+            else if (w.IsExplicitlyExcluded) status = Localization.Get(lang, "StateExcluded");
+            else if (w.IsManuallyUnlocked) status = Localization.Get(lang, "StateManuallyUnlocked");
+            else status = Localization.Get(lang, "StateParticipating");
+
+            string extra = string.Empty;
+            if (w.AssignmentLabel == AssignmentLabel.InitialDisplay)
+                extra = " · " + Localization.Get(lang, "LabelInitialDisplay");
+            else if (w.AssignmentLabel == AssignmentLabel.HistoryUnassigned)
+                extra = " · " + Localization.Get(lang, "LabelHistoryUnassigned");
+
+            if (w.IsFaultIsolated && !string.IsNullOrEmpty(w.FaultReason))
+                extra += "\n" + w.FaultReason;
+
+            return "#" + w.FixedDisplayNumber + " " + targetName + "\n" + status + extra;
         }
 
         private static void AddStyleSheet(VisualElement root, string guid)
