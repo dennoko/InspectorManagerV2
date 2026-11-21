@@ -93,6 +93,19 @@ namespace DennokoWorks.InspectorManagerV2.Composition
 
             coordinator.Initialize();
             ingress.Subscribe();
+
+            // Attach any InspectorManagerWindow already restored by Unity's Editor layout on startup / reload.
+            var existingWindows = UnityEngine.Resources.FindObjectsOfTypeAll<InspectorManagerWindow>();
+            if (existingWindows != null)
+            {
+                for (int i = 0; i < existingWindows.Length; i++)
+                {
+                    if (existingWindows[i] != null)
+                    {
+                        existingWindows[i].AttachHost(s_host);
+                    }
+                }
+            }
         }
 
         private static void OnBeforeAssemblyReloadFlag()
@@ -135,10 +148,10 @@ namespace DennokoWorks.InspectorManagerV2.Composition
 
             public void RegisterWindow(EditorWindow window)
             {
-                if (window != null)
-                {
-                    _openWindows.Add(window);
-                }
+                if (window == null) return;
+                _openWindows.Add(window);
+                bool canAutoStart = !s_isInLifecycleBoundary && !EditorApplication.isPlayingOrWillChangePlaymode;
+                Coordinator.SetManagerTabOpen(true, autoStartIfIdle: canAutoStart);
             }
 
             public void UnregisterWindowOnDestroy(EditorWindow window)
@@ -150,9 +163,11 @@ namespace DennokoWorks.InspectorManagerV2.Composition
 
                 _openWindows.RemoveWhere(w => w == null);
 
+                // When the LAST Manager tab is closed by the user (NOT reload/play/quit),
+                // stop rotation, clear overlays, and unlock ALL managed Inspectors.
                 if (!_disposed && !s_isInLifecycleBoundary && _openWindows.Count == 0)
                 {
-                    Coordinator.HandleLifecycleBoundaryStop(StopReason.LastManagerWindowClosed, suspendMode: false);
+                    Coordinator.SetManagerTabOpen(false);
                 }
             }
 

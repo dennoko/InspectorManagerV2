@@ -118,6 +118,7 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         public bool AllRestored { get; }
         public string ErrorMessage { get; }
         public bool RemainSuspended { get; }
+        public bool ForceUnlocked { get; }
 
         public StopSessionCompletedEvent(
             string opId,
@@ -125,13 +126,15 @@ namespace DennokoWorks.InspectorManagerV2.Domain
             IReadOnlyDictionary<WindowKey, LockLease> updatedLeases,
             bool allRestored,
             string errorMessage,
-            bool remainSuspended = false)
+            bool remainSuspended = false,
+            bool forceUnlocked = false)
             : base(opId, gen)
         {
             UpdatedLeases = updatedLeases;
             AllRestored = allRestored;
             ErrorMessage = errorMessage ?? string.Empty;
             RemainSuspended = remainSuspended;
+            ForceUnlocked = forceUnlocked;
         }
     }
 

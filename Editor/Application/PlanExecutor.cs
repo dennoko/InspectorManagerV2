@@ -491,6 +491,107 @@ namespace DennokoWorks.InspectorManagerV2.Application
             return (result, allRestored, string.Join(" | ", errors));
         }
 
+        /// <summary>
+        /// Explicitly unlocks all specified alive windows (used when the last Manager tool tab is closed).
+        /// </summary>
+        public (Dictionary<WindowKey, LockLease> updatedLeases, bool allUnlocked, string error) UnlockAllWindows(
+            IEnumerable<WindowKey> managedWindowKeys,
+            IReadOnlyDictionary<WindowKey, LockLease> currentLeases,
+            long generation,
+            string operationId,
+            string editorSessionId,
+            string managementSessionId)
+        {
+            var result = new Dictionary<WindowKey, LockLease>();
+            var errors = new List<string>();
+            bool allUnlocked = true;
+
+            var targetKeys = new HashSet<WindowKey>();
+            if (managedWindowKeys != null)
+            {
+                foreach (var k in managedWindowKeys)
+                {
+                    if (k.IsValid) targetKeys.Add(k);
+                }
+            }
+            if (currentLeases != null)
+            {
+                foreach (var kvp in currentLeases)
+                {
+                    if (kvp.Key.IsValid) targetKeys.Add(kvp.Key);
+                }
+            }
+
+            foreach (var key in targetKeys)
+            {
+                LockLease lease = null;
+                bool hasLease = currentLeases != null && currentLeases.TryGetValue(key, out lease);
+                string evidence = hasLease ? lease.IdentityEvidence : null;
+
+                if (!_inspectorAdapter.IsWindowAlive(key, evidence))
+                {
+                    if (hasLease)
+                    {
+                        result[key] = lease.WithRestoration(LeaseRestorationStatus.WindowDisposed);
+                    }
+                    continue;
+                }
+
+                try
+                {
+                    var writeRes = _inspectorAdapter.WriteLockOnly(key, false);
+                    if (writeRes.IsSuccess && !writeRes.ObservedLocked)
+                    {
+                        _verifiedCache.Remove(key);
+                        if (hasLease)
+                        {
+                            result[key] = lease.WithRestoration(LeaseRestorationStatus.Restored);
+                        }
+                    }
+                    else
+                    {
+                        allUnlocked = false;
+                        string err = "Failed to unlock Inspector " + key + ": " + writeRes.Error;
+                        errors.Add(err);
+                        if (hasLease)
+                        {
+                            result[key] = lease.WithRestoration(LeaseRestorationStatus.RestoreFailed, err);
+                        }
+                        _logger.Error(operationId, generation, key, "TabCloseUnlockFailed", err);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    allUnlocked = false;
+                    string err = "Exception unlocking Inspector " + key + ": " + ex.Message;
+                    errors.Add(err);
+                    if (hasLease)
+                    {
+                        result[key] = lease.WithRestoration(LeaseRestorationStatus.RestoreFailed, err);
+                    }
+                    _logger.Error(operationId, generation, key, "TabCloseUnlockException", err);
+                }
+            }
+
+            if (allUnlocked)
+            {
+                _persistenceStore.ClearRecoveryJournal();
+            }
+            else if (result.Count > 0)
+            {
+                var journal = new RecoveryJournalDto
+                {
+                    EditorSessionId = editorSessionId ?? string.Empty,
+                    ManagementSessionId = managementSessionId ?? string.Empty,
+                    Generation = generation,
+                    Leases = result.Values.Select(LeaseJournalEntryDto.FromDomain).ToList()
+                };
+                _persistenceStore.SaveRecoveryJournalImmediate(journal);
+            }
+
+            return (result, allUnlocked, string.Join(" | ", errors));
+        }
+
         private PlanExecutionOutcome CompensateAndRestoreLeases(
             ManagerState state,
             AssignmentPlan plan,

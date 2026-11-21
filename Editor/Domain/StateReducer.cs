@@ -280,10 +280,12 @@ namespace DennokoWorks.InspectorManagerV2.Domain
         {
             // Clear session-only RotationHistory, but PRESERVE explicit exclusions, role order, and fixed numbers.
             var cleanedWindows = state.Windows.Select(w => w.With(
-                observedLocked: e.UpdatedLeases != null && e.UpdatedLeases.TryGetValue(w.Key, out var lease)
-                    && lease.RestorationStatus == LeaseRestorationStatus.Restored
-                    ? lease.OriginalLocked
-                    : w.ObservedLocked)).ToArray();
+                observedLocked: e.ForceUnlocked && w.IsManaged && w.IsAlive
+                    ? false
+                    : (e.UpdatedLeases != null && e.UpdatedLeases.TryGetValue(w.Key, out var lease)
+                        && lease.RestorationStatus == LeaseRestorationStatus.Restored
+                        ? lease.OriginalLocked
+                        : w.ObservedLocked))).ToArray();
 
             RuntimeLifecycleState finalLifecycle;
             if (!e.AllRestored)

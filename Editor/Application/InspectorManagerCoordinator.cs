@@ -80,11 +80,13 @@ namespace DennokoWorks.InspectorManagerV2.Application
         private long _persistDirtyAtMs = -1;
         private long _reloadGraceUntilMs = -1;
         private bool _isInputBlocked;
+        private bool _isManagerTabOpen;
         private bool _disposed;
 
         public event Action StateChanged;
 
         public ManagerState CurrentState => _state;
+        public bool IsManagerTabOpen => _isManagerTabOpen;
 
         public InspectorManagerCoordinator(
             string projectId,
@@ -255,6 +257,83 @@ namespace DennokoWorks.InspectorManagerV2.Application
             NotifyStateChanged();
         }
 
+        /// <summary>
+        /// Updates whether at least one Manager tool tab is open.
+        /// - Opening a tab enables the extension and starts History mode by default (when not suspended/in Play Mode).
+        /// - Closing the last tab stops the extension, clears overlays, and unlocks ALL managed Inspectors.
+        /// </summary>
+        public void SetManagerTabOpen(bool isOpen, bool autoStartIfIdle = true)
+        {
+            if (_disposed) return;
+
+            bool prevOpen = _isManagerTabOpen;
+            _isManagerTabOpen = isOpen;
+
+            if (isOpen)
+            {
+                if (!prevOpen)
+                {
+                    SyncOverlays();
+                }
+
+                if (autoStartIfIdle
+                    && !_isInputBlocked
+                    && (_state.LifecycleState == RuntimeLifecycleState.Off || _state.LifecycleState == RuntimeLifecycleState.Suspended))
+                {
+                    EnqueueStartRotation();
+                }
+
+                NotifyStateChanged();
+            }
+            else if (prevOpen)
+            {
+                HandleLastManagerTabClosed();
+            }
+        }
+
+        /// <summary>
+        /// Stops rotation when the last Manager tool tab is closed and unlocks ALL managed Inspectors.
+        /// </summary>
+        public void HandleLastManagerTabClosed()
+        {
+            string opId = NextOperationId();
+            _isManagerTabOpen = false;
+            _queue.Clear();
+            _planExecutor.CancelPendingVerification();
+            _planExecutor.InvalidateAllCaches();
+            _inspectorAdapter.InvalidateCache();
+
+            PersistSessionLayoutNow();
+            _persistenceStore.FlushSettings();
+            _persistDirtyAtMs = -1;
+
+            SynchronizeWindows(opId);
+
+            if (_state.LifecycleState == RuntimeLifecycleState.Running || _state.LifecycleState == RuntimeLifecycleState.Starting || _state.Leases.Count > 0)
+            {
+                ApplyReduce(new StopSessionRequestedEvent(opId, _state.Generation, StopReason.LastManagerWindowClosed, suspendMode: false));
+            }
+
+            var managedKeys = _state.Windows.Where(w => w.IsManaged && w.IsAlive).Select(w => w.Key).ToArray();
+            var (updatedLeases, allUnlocked, error) = _planExecutor.UnlockAllWindows(
+                managedKeys,
+                _state.Leases,
+                _state.Generation,
+                opId,
+                _editorSessionId,
+                _managementSessionId);
+
+            // Reflect unlocked state on all managed windows.
+            var unlockedWindows = _state.Windows.Select(w =>
+                w.IsManaged && w.IsAlive && allUnlocked ? w.With(observedLocked: false) : w).ToArray();
+            _state = _state.With(windows: unlockedWindows);
+
+            ApplyReduce(new StopSessionCompletedEvent(opId, _state.Generation, updatedLeases, allUnlocked, error, remainSuspended: false, forceUnlocked: allUnlocked));
+
+            _overlayPresenter?.ClearAllOverlays();
+            NotifyStateChanged();
+        }
+
         public void ResumeInputAfterPlayModeReturn()
         {
             _isInputBlocked = false;
@@ -263,11 +342,18 @@ namespace DennokoWorks.InspectorManagerV2.Application
 
             if (_state.LifecycleState == RuntimeLifecycleState.Suspended)
             {
-                _state = _state.With(lifecycleState: RuntimeLifecycleState.Off, statusNotice: "Off (returned from Play Mode).");
+                _state = _state.With(lifecycleState: RuntimeLifecycleState.Off, statusNotice: "Off");
             }
 
             EnqueueSynchronizeWindows();
             EnqueueInvalidateEnvironmentCaches();
+
+            // Automatically resume History mode when returning from Play Mode if a Manager tab is open.
+            if (_isManagerTabOpen && _state.LifecycleState == RuntimeLifecycleState.Off)
+            {
+                EnqueueStartRotation();
+            }
+
             NotifyStateChanged();
         }
 
@@ -1355,7 +1441,7 @@ namespace DennokoWorks.InspectorManagerV2.Application
         private void SyncOverlays(IReadOnlyCollection<WindowKey> flashedWindows = null)
         {
             if (_overlayPresenter == null) return;
-            if (!_state.Settings.ShowInspectorOverlays)
+            if (!_isManagerTabOpen || !_state.Settings.ShowInspectorOverlays)
             {
                 _overlayPresenter.ClearAllOverlays();
                 return;

@@ -425,6 +425,96 @@ namespace DennokoWorks.InspectorManagerV2.Tests
         }
 
         [Test]
+        public void ManagerTabOpen_AutoStartsIntoRunning_AndClosedTabStaysOff()
+        {
+            var (coord, adapter, _, _, _, _) = DomainLogicTests.CreateHarness(2, initialLocked: false);
+
+            Assert.AreEqual(RuntimeLifecycleState.Off, coord.CurrentState.LifecycleState);
+            Assert.IsFalse(coord.IsManagerTabOpen);
+            Assert.IsFalse(adapter.Get("w1").IsLocked);
+
+            coord.SetManagerTabOpen(true);
+            coord.Tick();
+
+            Assert.IsTrue(coord.IsManagerTabOpen);
+            Assert.AreEqual(RuntimeLifecycleState.Running, coord.CurrentState.LifecycleState, "Opening the tool tab must start History mode by default.");
+            Assert.IsTrue(adapter.Get("w1").IsLocked);
+            Assert.IsTrue(adapter.Get("w2").IsLocked);
+        }
+
+        [Test]
+        public void ClosingLastManagerTab_UnlocksAllManagedInspectors_EvenIfOriginallyLocked()
+        {
+            var (coord, adapter, _, persist, _, _) = DomainLogicTests.CreateHarness(2, initialLocked: false);
+            adapter.Get("w1").IsLocked = true; // w1 was originally locked before Start
+
+            coord.SetManagerTabOpen(true);
+            coord.Tick();
+            Assert.AreEqual(RuntimeLifecycleState.Running, coord.CurrentState.LifecycleState);
+            Assert.IsTrue(coord.CurrentState.Leases[new WindowKey("w1")].OriginalLocked);
+
+            // Close the tool tab -> ALL managed Inspectors must be unlocked (including w1!)
+            coord.SetManagerTabOpen(false);
+
+            Assert.IsFalse(coord.IsManagerTabOpen);
+            Assert.AreEqual(RuntimeLifecycleState.Off, coord.CurrentState.LifecycleState);
+            Assert.IsFalse(adapter.Get("w1").IsLocked, "Closing tool tab must unlock all managed Inspectors, even originally locked ones.");
+            Assert.IsFalse(adapter.Get("w2").IsLocked);
+            Assert.IsFalse(coord.CurrentState.FindWindow(new WindowKey("w1")).ObservedLocked);
+            Assert.IsFalse(coord.CurrentState.FindWindow(new WindowKey("w2")).ObservedLocked);
+            Assert.IsNull(persist.StoredJournal);
+        }
+
+        [Test]
+        public void ClosingLastManagerTab_WhileAlreadyOff_StillUnlocksAllManagedInspectors()
+        {
+            var (coord, adapter, _, _, _, _) = DomainLogicTests.CreateHarness(2, initialLocked: false);
+
+            coord.SetManagerTabOpen(true);
+            coord.Tick();
+            coord.EnqueueStopRotation();
+            coord.Tick();
+            Assert.AreEqual(RuntimeLifecycleState.Off, coord.CurrentState.LifecycleState);
+
+            // Manually lock w1 while Off, then close the tool tab
+            coord.EnqueueToggleLock(new WindowKey("w1"));
+            coord.Tick();
+            Assert.IsTrue(adapter.Get("w1").IsLocked);
+
+            coord.SetManagerTabOpen(false);
+            Assert.IsFalse(adapter.Get("w1").IsLocked, "Closing tool tab while Off must still unlock all managed Inspectors.");
+            Assert.IsFalse(adapter.Get("w2").IsLocked);
+        }
+
+        [Test]
+        public void PlayModeReturn_AutoStartsOnlyWhenManagerTabIsOpen()
+        {
+            var (coord, adapter, _, _, _, _) = DomainLogicTests.CreateHarness(2, initialLocked: false);
+
+            // Case 1: Tab is open -> returning from Play Mode auto-starts
+            coord.SetManagerTabOpen(true);
+            coord.Tick();
+            Assert.AreEqual(RuntimeLifecycleState.Running, coord.CurrentState.LifecycleState);
+
+            coord.HandleLifecycleBoundaryStop(StopReason.PlayModeTransition, suspendMode: true);
+            Assert.AreEqual(RuntimeLifecycleState.Suspended, coord.CurrentState.LifecycleState);
+            Assert.IsFalse(adapter.Get("w1").IsLocked);
+
+            coord.ResumeInputAfterPlayModeReturn();
+            coord.Tick();
+            Assert.AreEqual(RuntimeLifecycleState.Running, coord.CurrentState.LifecycleState, "Must auto-start after Play Mode return when tab is open.");
+            Assert.IsTrue(adapter.Get("w1").IsLocked);
+
+            // Case 2: Tab is closed -> returning from Play Mode stays Off
+            coord.SetManagerTabOpen(false);
+            coord.HandleLifecycleBoundaryStop(StopReason.PlayModeTransition, suspendMode: true);
+            coord.ResumeInputAfterPlayModeReturn();
+            coord.Tick();
+            Assert.AreEqual(RuntimeLifecycleState.Off, coord.CurrentState.LifecycleState, "Must remain Off after Play Mode return when no tab is open.");
+            Assert.IsFalse(adapter.Get("w1").IsLocked);
+        }
+
+        [Test]
         public void AtomicJsonFileStore_HandlesBackupFallback_CorruptionQuarantine_NewerSchemaBlock_AndReadYourOwnWrites()
         {
             string tempDir = Path.Combine(Path.GetTempPath(), "imv2_test_" + Guid.NewGuid().ToString("N"));
